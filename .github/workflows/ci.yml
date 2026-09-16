@@ -44,6 +44,9 @@ jobs:
       - name: Build package
         run: pnpm build
 
+      - name: Test Node resolution preload
+        run: pnpm test:resolution
+
       - name: Validate publish contents
         run: pnpm pack --dry-run
 

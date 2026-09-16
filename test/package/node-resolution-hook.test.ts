@@ -1,17 +1,8 @@
 import { execFile } from "node:child_process";
-import {
-  copyFile,
-  cp,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 const fixtureDirectory = fileURLToPath(
@@ -21,20 +12,6 @@ const projectDirectory = fileURLToPath(new URL("../../", import.meta.url));
 
 let temporaryDirectory: string;
 let applicationDirectory: string;
-
-async function transpileSource(source: string, destination: string): Promise<void> {
-  const input = await readFile(source, "utf8");
-  const { outputText } = transpileModule(input, {
-    compilerOptions: {
-      module: ModuleKind.ESNext,
-      target: ScriptTarget.ES2022,
-    },
-    fileName: source,
-  });
-
-  await mkdir(dirname(destination), { recursive: true });
-  await writeFile(destination, outputText);
-}
 
 function runFixture(entry: string, preload: boolean): Promise<string> {
   const arguments_ = preload
@@ -87,13 +64,10 @@ beforeAll(async () => {
     join(fixtureDirectory, "localbox-vercel.js"),
     join(localboxDirectory, "dist", "vercel", "index.js"),
   );
-  await transpileSource(
-    join(projectDirectory, "src", "interception", "node-preload.ts"),
-    join(localboxDirectory, "dist", "interception", "node-preload.js"),
-  );
-  await transpileSource(
-    join(projectDirectory, "src", "interception", "resolve-hook.ts"),
-    join(localboxDirectory, "dist", "interception", "resolve-hook.js"),
+  await cp(
+    join(projectDirectory, "dist", "interception"),
+    join(localboxDirectory, "dist", "interception"),
+    { recursive: true },
   );
 });
 
