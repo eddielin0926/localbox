@@ -129,7 +129,7 @@ try {
 
   await runSuccessful(
     "package creation",
-    "npm",
+    "pnpm",
     ["pack", "--pack-destination", packageDirectory],
     { cwd: projectDirectory },
   );
