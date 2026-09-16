@@ -2,7 +2,7 @@
 
 This document fixes the framework-neutral interception contract for Localbox v0.2. It is the implementation contract for [M1](ROADMAP.md#m1--development-interception-and-local-dx); the CLI and Node preload implement the core path, while the matrix below records its verified and unsupported boundaries.
 
-This contract describes the unreleased v0.2.0 source. The currently published v0.1.0 package does not contain the `localbox --` wrapper; its supported import remains `localbox/vercel`.
+This contract describes Localbox v0.2.0. The package includes the `localbox --` wrapper alongside its existing `localbox/vercel` import.
 
 ## Activation and command surface
 
