@@ -47,6 +47,9 @@ jobs:
       - name: Test Node resolution preload
         run: pnpm test:resolution
 
+      - name: Test CLI process wrapper
+        run: pnpm test:cli
+
       - name: Validate publish contents
         run: pnpm pack --dry-run
 

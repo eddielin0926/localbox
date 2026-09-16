@@ -28,6 +28,9 @@
     "access": "public"
   },
   "type": "module",
+  "bin": {
+    "localbox": "./dist/cli.js"
+  },
   "packageManager": "pnpm@12.3.4",
   "exports": {
     "./vercel": {
@@ -52,10 +55,11 @@
   },
   "scripts": {
     "prepack": "pnpm build",
-    "build": "node --eval \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "build": "node --eval \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && node --eval \"require('node:fs').chmodSync('dist/cli.js',0o755)\"",
     "typecheck": "tsc -p tsconfig.json",
     "test:unit": "vitest run test/unit",
     "test:resolution": "vitest run test/package/node-resolution-hook.test.ts",
+    "test:cli": "vitest run test/package/cli-process-wrapper.test.ts",
     "test:integration": "vitest run test/integration",
     "smoke": "node examples/basic.mjs",
     "compatibility:vercel": "node scripts/report-compatibility.mjs"
