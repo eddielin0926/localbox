@@ -106,6 +106,7 @@ export interface RawExecOptions {
   cmd: string[];
   cwd?: string;
   env?: string[];
+  user?: string;
   stdin?: Buffer | Uint8Array;
   signal?: AbortSignal;
 }
@@ -138,6 +139,7 @@ export async function rawExec(
       Cmd: options.cmd,
       ...(options.cwd === undefined ? {} : { WorkingDir: options.cwd }),
       ...(options.env === undefined ? {} : { Env: options.env }),
+      ...(options.user === undefined ? {} : { User: options.user }),
       ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
     });
     throwIfAborted(options.signal);

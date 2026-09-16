@@ -459,6 +459,7 @@ export class FileSystem {
     const container = await this.#getRunningContainer();
     const result = await rawExec(container, {
       cmd: ["node", "--input-type=module", "-e", FILESYSTEM_BRIDGE, operation, JSON.stringify(args)],
+      ...(operation === "chown" ? { user: "0" } : {}),
       ...(stdin === undefined ? {} : { stdin }),
       ...(signal === undefined ? {} : { signal }),
     });

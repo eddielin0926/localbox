@@ -181,6 +181,8 @@ describe("Docker-backed sandbox contracts", () => {
       expect(fileStats.isFile()).toBe(true);
       expect(fileStats.mode & 0o777).toBe(0o640);
       await sandbox.fs.chown("data/nested/c.bin", 0, 0);
+      expect(await sandbox.fs.stat("data/nested/c.bin")).toMatchObject({ uid: 0, gid: 0 });
+      await sandbox.fs.chown("data/nested/c.bin", fileStats.uid, fileStats.gid);
       await sandbox.fs.symlink("c.bin", "data/nested/current");
       expect(await sandbox.fs.readlink("data/nested/current")).toBe("c.bin");
       expect(await sandbox.fs.realpath("data/nested/current")).toBe("/vercel/sandbox/data/nested/c.bin");
