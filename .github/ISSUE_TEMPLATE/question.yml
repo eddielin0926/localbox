@@ -1,0 +1,50 @@
+name: Question
+description: Ask for help using Localbox or understanding its documented behavior.
+title: "[Question]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read the README and SUPPORT guide and search existing issues before asking a question.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I read the documentation and searched existing issues.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installation and setup
+        - Sandbox lifecycle
+        - Commands and streaming
+        - Filesystem
+        - Networking and ports
+        - Vercel compatibility
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Explain what you are trying to achieve and where you are blocked.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Environment and context
+      description: Include relevant Localbox, Node.js, Docker, and operating-system versions. Remove sensitive values.
+    validations:
+      required: false
+  - type: checkboxes
+    id: conduct
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I agree to follow this project's Code of Conduct.
+          required: true

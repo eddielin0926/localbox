@@ -1,6 +1,26 @@
 {
   "name": "localbox",
   "version": "0.1.0",
+  "description": "Run Vercel-compatible sandbox APIs locally with Docker.",
+  "license": "MIT",
+  "author": "Eddie Lin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eddielin0926/localbox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/eddielin0926/localbox/issues"
+  },
+  "homepage": "https://github.com/eddielin0926/localbox#readme",
+  "keywords": [
+    "docker",
+    "local-development",
+    "nodejs",
+    "sandbox",
+    "typescript",
+    "vercel",
+    "vercel-sandbox"
+  ],
   "private": false,
   "type": "module",
   "packageManager": "pnpm@12.3.4",
