@@ -234,3 +234,14 @@ pnpm test:integration
 pnpm smoke
 pnpm compatibility:vercel
 ```
+
+## Community
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change.
+- Use [SUPPORT.md](SUPPORT.md) for help and support scope.
+- Report vulnerabilities privately by following [SECURITY.md](SECURITY.md).
+- Participate according to the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+Localbox is available under the [MIT License](LICENSE).
