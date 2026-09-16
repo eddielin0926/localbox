@@ -37,6 +37,10 @@
       "types": "./dist/vercel/index.d.ts",
       "import": "./dist/vercel/index.js"
     },
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js"
+    },
     "./node-preload": {
       "types": "./dist/interception/node-preload.d.ts",
       "import": "./dist/interception/node-preload.js"
@@ -46,6 +50,7 @@
     "dist",
     "images/vercel",
     "README.md",
+    "RUNTIME.md",
     "src/vercel/compatibility.json",
     "scripts/report-compatibility.mjs"
   ],

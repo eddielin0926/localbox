@@ -117,7 +117,7 @@ Extract Docker from the compatibility frontend without changing public behavior.
 
 Deliverables:
 
-- Backend-neutral sandbox, process, endpoint, status, deadline, and error types.
+- Backend-neutral sandbox, process, endpoint, status, deadline, and error types, defined by the [runtime client contract](RUNTIME.md).
 - A transport-safe sandbox client contract.
 - Embedded client implementation for in-process use.
 - `DockerBackend` containing Docker lifecycle, exec, stream demultiplexing, labels, ports, and error translation.
