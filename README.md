@@ -98,7 +98,7 @@ import { Sandbox } from "@vercel/sandbox";
 
 This mode will be explicitly enabled and development-only. The framework-neutral path will use a Localbox CLI process wrapper to install process-scoped Node module-resolution interception, selecting `localbox/vercel` only inside the wrapped process. Ordinary execution and production builds will continue to resolve the original provider SDK unless Localbox is explicitly enabled.
 
-Aliases or adapters for Next.js, Vite, Turbopack, and other toolchains will remain optional integrations for cases where the host framework or bundler cannot honor the core Node interception path. The wrapper and interception hook are planned; the current release still requires the direct `localbox/vercel` import shown above.
+Aliases or adapters for Next.js, Vite, Turbopack, and other toolchains will remain optional integrations for cases where the host framework or bundler cannot honor the core Node interception path. The [v0.2 interception contract](INTERCEPTION.md) fixes the planned wrapper and resolution behavior; the current release still requires the direct `localbox/vercel` import shown above.
 
 ## API reference
 
