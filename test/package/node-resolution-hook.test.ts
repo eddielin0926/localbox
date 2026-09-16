@@ -1,9 +1,16 @@
 import { execFile } from "node:child_process";
-import { copyFile, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+
+interface ProcessResult {
+  code: number;
+  signal: NodeJS.Signals | null;
+  stderr: string;
+  stdout: string;
+}
 
 const fixtureDirectory = fileURLToPath(
   new URL("../fixtures/node-resolution/", import.meta.url),
@@ -13,11 +20,11 @@ const projectDirectory = fileURLToPath(new URL("../../", import.meta.url));
 let temporaryDirectory: string;
 let applicationDirectory: string;
 
-function runFixture(entry: string, preload: boolean): Promise<string> {
+function runFixtureResult(entry: string, preload: boolean): Promise<ProcessResult> {
   const arguments_ = preload
     ? ["--import", "localbox/node-preload", entry]
     : [entry];
-  const { promise, reject, resolve } = Promise.withResolvers<string>();
+  const { promise, resolve } = Promise.withResolvers<ProcessResult>();
 
   execFile(
     process.execPath,
@@ -27,16 +34,26 @@ function runFixture(entry: string, preload: boolean): Promise<string> {
       env: { ...process.env, NODE_OPTIONS: undefined },
     },
     (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(`${error.message}\n${stderr}`));
-        return;
-      }
-
-      resolve(stdout.trim());
+      resolve({
+        code: error === null ? 0 : typeof error.code === "number" ? error.code : 1,
+        signal: error?.signal ?? null,
+        stderr,
+        stdout,
+      });
     },
   );
 
   return promise;
+}
+
+async function runFixture(entry: string, preload: boolean): Promise<string> {
+  const result = await runFixtureResult(entry, preload);
+
+  if (result.code !== 0) {
+    throw new Error(`fixture exited with ${result.code}\n${result.stderr}`);
+  }
+
+  return result.stdout.trim();
 }
 
 beforeAll(async () => {
@@ -82,6 +99,31 @@ describe("Node ESM resolution preload", () => {
       await expect(runFixture(entry, true)).resolves.toBe("localbox");
     },
   );
+
+  test("classifies hook setup failures and stops before provider fallback", async () => {
+    const hookPath = join(
+      applicationDirectory,
+      "node_modules",
+      "localbox",
+      "dist",
+      "interception",
+      "resolve-hook.js",
+    );
+    const missingHookPath = `${hookPath}.missing`;
+    await rename(hookPath, missingHookPath);
+
+    try {
+      const result = await runFixtureResult("static.mjs", true);
+
+      expect(result).toMatchObject({ code: 1, signal: null, stdout: "" });
+      expect(result.stderr).toContain("LOCALBOX_HOOK_SETUP_FAILED");
+      expect(result.stderr).toContain("ERR_MODULE_NOT_FOUND");
+      expect(result.stderr).toContain("resolve-hook.js");
+      expect(result.stderr).toContain("did not fall back to @vercel/sandbox");
+    } finally {
+      await rename(missingHookPath, hookPath);
+    }
+  });
 
   test("leaves ordinary provider resolution unchanged without the preload", async () => {
     await expect(runFixture("static.mjs", false)).resolves.toBe("provider");

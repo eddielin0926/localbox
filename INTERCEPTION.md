@@ -1,6 +1,6 @@
 # v0.2 development interception contract
 
-This document fixes the framework-neutral interception contract for Localbox v0.2. It is an implementation contract for [M1](ROADMAP.md#m1--development-interception-and-local-dx), not a claim that the current release already provides a CLI or resolution hook.
+This document fixes the framework-neutral interception contract for Localbox v0.2. It is the implementation contract for [M1](ROADMAP.md#m1--development-interception-and-local-dx); the CLI and Node preload implement the core path, while the matrix below records its verified and unsupported boundaries.
 
 ## Activation and command surface
 
@@ -40,13 +40,37 @@ The supported v0.2 topology is a host-installed Localbox CLI launching a host co
 
 Commands launched normally, without `localbox --`, resolve `@vercel/sandbox` through the application's ordinary package resolution. Localbox does not activate from installation, `NODE_ENV`, or the presence of Docker. CI, release builds, production builds, and production startup must use ordinary execution and therefore the original provider SDK. Wrapping a production build or production process is outside the supported v0.2 contract; Localbox does not attempt to infer a command's intent.
 
+## Initial toolchain status
+
+| Caller or resolution path | Status | Behavior and action |
+| --- | --- | --- |
+| Direct Node.js ESM static import or dynamic `import()` of the exact bare `@vercel/sandbox` specifier | **Verified** | The packaged resolution test covers both forms. Run the application through `localbox --`; the import maps to `localbox/vercel`. |
+| The first Node.js process launched by the wrapper with inherited `NODE_OPTIONS` | **Verified** | The CLI process test covers the inherited preload and provider mapping. |
+| Further Node.js descendants, worker threads, `child_process.fork()` children, and cluster workers that preserve inherited `NODE_OPTIONS` | **Supported by documented Node behavior; not fully integration-tested** | Node preloads `--import` modules in these contexts. A descendant that deletes or replaces `NODE_OPTIONS` leaves the supported path. |
+| CommonJS `require("@vercel/sandbox")`, including an existing `--require` preload | **Unsupported** | CommonJS interception is outside v0.2. `--require` also runs before Localbox's `--import` preload. Use an explicit `localbox/vercel` import in development code that can do so; Localbox does not fall back remotely. |
+| Next.js, Vite, Turbopack, and other bundler or framework resolvers | **Unverified** | No core compatibility claim or adapter currently exists. Confirm the toolchain's resolution path before treating a result as a bypass; use `localbox/vercel` explicitly when acceptable. |
+| Bun, Deno, and other alternate JavaScript runtimes | **Unsupported** | The core hook uses Node's `node:module` API. |
+| Application callers running inside containers | **Unsupported** | Caller-to-host routing and an unchanged-application Docker scenario belong to [#20](https://github.com/eddielin0926/localbox/issues/20), not this interception layer. |
+
 ## Diagnostics
 
 Diagnostics go to standard error and identify one of these categories:
 
 - **`LOCALBOX_UNSUPPORTED_RUNTIME`:** the CLI is running on a Node version below `22.12.0`. The diagnostic includes the detected version, the supported range, and guidance to change Node versions. The command is not launched and the wrapper exits with status `1`.
-- **`LOCALBOX_HOOK_SETUP_FAILED`:** the Node version is supported but the preload or resolution hook cannot be initialized. The diagnostic includes the underlying setup error. The application entry point must not run with silently missing interception.
-- **`LOCALBOX_TOOLCHAIN_BYPASS`:** a framework, bundler, alternate JavaScript runtime, daemon, or child with a replaced environment resolves or bundles `@vercel/sandbox` outside the participating Node hook. Guidance must explain that this is a toolchain-path limitation and point to direct `localbox/vercel` imports or a future optional adapter; it must not describe the runtime as unsupported. The absence of an observed target import by itself is not evidence of bypass and must not produce this diagnostic.
+- **`LOCALBOX_HOOK_SETUP_FAILED`:** the Node version is supported but the preload or resolution hook cannot be initialized. The diagnostic preserves the underlying error and states that the application was not started and the provider was not used as a fallback.
+- **`LOCALBOX_TOOLCHAIN_BYPASS`:** reserved for a framework, bundler, alternate JavaScript runtime, daemon, or child whose resolution path is directly known to run outside the participating Node hook. The diagnostic must name the observed path limitation and point to an explicit `localbox/vercel` import or an available optional adapter; it must not describe the Node runtime as unsupported.
+
+The core wrapper cannot observe every resolver in a descendant toolchain and therefore does not infer `LOCALBOX_TOOLCHAIN_BYPASS` merely because its hook did not see a provider import. A resolver callback, toolchain configuration, replaced `NODE_OPTIONS`, or an equivalent direct observation is required evidence. Localbox does not buffer arbitrary child output to guess whether a bypass occurred.
+
+Runtime and hook-setup failures fail closed. Any adapter that emits a bypass diagnostic must do the same: Localbox never handles an interception failure by silently selecting the installed remote `@vercel/sandbox` implementation.
+
+## Optional adapter boundary
+
+An adapter is an optional integration package or explicit toolchain configuration for a resolver that is proven to bypass the core Node path. It sits outside the core CLI/runtime dependency graph: an adapter may depend on Localbox, but the `localbox` package must not depend on a framework, bundler, adapter registry, or adapter package.
+
+Adapters must be explicitly enabled for development, map only the intended provider specifier to the public `localbox/vercel` entry point, preserve ordinary provider resolution when not enabled, and fail closed with an actionable diagnostic when setup fails. They must not silently choose remote execution or claim a bypass without direct evidence from the toolchain they integrate with.
+
+No adapter API or registry is defined until a concrete toolchain requires one. The current executable seam is the public `localbox/vercel` export plus each toolchain's own opt-in alias or resolver configuration; adding an unused core interface would broaden the contract without proving interoperability.
 
 ## Non-goals for v0.2 core interception
 
@@ -60,4 +84,4 @@ Diagnostics go to standard error and identify one of these categories:
 
 ## Node.js basis
 
-The contract relies on Node's documented behavior that [`--import` preloads modules](https://nodejs.org/docs/latest-v22.x/api/cli.html#--importmodule) in the main thread, workers, forked processes, and cluster workers; [`NODE_OPTIONS`](https://nodejs.org/docs/latest-v22.x/api/cli.html#node_optionsoptions) accepts `--import`; and [module customization hooks](https://nodejs.org/docs/latest-v22.x/api/module.html#customization-hooks) can be registered before application modules load. Signal forwarding follows Node's documented [signal portability](https://nodejs.org/docs/latest-v22.x/api/process.html#signal-events) and [child-process exit reporting](https://nodejs.org/docs/latest-v22.x/api/child_process.html#event-exit).
+The CLI reads the actual runtime from [`process.versions.node`](https://nodejs.org/docs/latest-v22.x/api/process.html#processversions), which is the Node version without the leading `v`. The contract also relies on Node's documented behavior that [`--import` preloads modules](https://nodejs.org/docs/latest-v22.x/api/cli.html#--importmodule) in the main thread, workers, forked processes, and cluster workers; [`NODE_OPTIONS`](https://nodejs.org/docs/latest-v22.x/api/cli.html#node_optionsoptions) accepts `--import`; and [module customization hooks](https://nodejs.org/docs/latest-v22.x/api/module.html#customization-hooks) can be registered before application modules load. Node awaits the hook module's [`initialize`](https://nodejs.org/docs/latest-v22.x/api/module.html#initialize) function before the main application thread resumes, allowing setup failures to stop application startup. Signal forwarding follows Node's documented [signal portability](https://nodejs.org/docs/latest-v22.x/api/process.html#signal-events) and [child-process exit reporting](https://nodejs.org/docs/latest-v22.x/api/child_process.html#event-exit).
