@@ -115,6 +115,28 @@ describe("localbox process wrapper", () => {
     expect(missingExecutable.stderr).toContain("an executable is required after `--`");
   });
 
+  test("rejects an unsupported runtime before starting the command", async () => {
+    const result = await runProcess(
+      process.execPath,
+      [
+        "--import",
+        pathToFileURL(join(fixtureDirectory, "unsupported-node.mjs")).href,
+        cliPath,
+        "--",
+        process.execPath,
+        "-e",
+        'process.stdout.write("started")',
+      ],
+      { env: cleanEnvironment },
+    );
+
+    expect(result).toMatchObject({ code: 1, signal: null, stdout: "" });
+    expect(result.stderr).toBe(
+      "localbox: [LOCALBOX_UNSUPPORTED_RUNTIME] Node.js 20.11.1 is unsupported; " +
+        "Node.js >=22.12.0 is required. Switch Node.js versions and retry.\n",
+    );
+  });
+
   test("forwards arguments, cwd, and environment while composing NODE_OPTIONS", async () => {
     const existingNodeOptions = `--import=${pathToFileURL(
       join(applicationDirectory, "existing-preload.mjs"),

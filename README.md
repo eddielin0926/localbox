@@ -4,9 +4,9 @@ Run cloud sandbox SDKs locally during development with Docker.
 
 Localbox is an open-source local development runtime for applications that depend on cloud sandbox SDKs. Its goal is to let those applications run locally with zero or near-zero application-code changes, initially for Vercel Sandbox on Docker.
 
-The current release provides a Vercel-compatible implementation through `localbox/vercel`; applications must import that entry point today. Transparent, opt-in development interception that preserves provider imports is planned and is not yet supported. No hosted Localbox service, credentials, CLI, or configuration file is required by the current release.
+The current release provides a Vercel-compatible implementation through `localbox/vercel` and an opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. No hosted Localbox service, credentials, or configuration file is required.
 
-See [ROADMAP.md](ROADMAP.md) for the planned development interception, compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
+See [ROADMAP.md](ROADMAP.md) for planned compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
 
 ## Features
 
@@ -88,17 +88,25 @@ try {
 
 See [`examples/basic.mjs`](examples/basic.mjs) for a runnable example covering ports, persistence, and cleanup.
 
-## Development interception (planned)
+## Development interception
 
-Localbox's target development experience preserves the application's provider import:
+Keep the application's provider import:
 
 ```js
 import { Sandbox } from "@vercel/sandbox";
 ```
 
-This mode will be explicitly enabled and development-only. The framework-neutral path will use a Localbox CLI process wrapper to install process-scoped Node module-resolution interception, selecting `localbox/vercel` only inside the wrapped process. Ordinary execution and production builds will continue to resolve the original provider SDK unless Localbox is explicitly enabled.
+Then explicitly wrap the development command:
 
-Aliases or adapters for Next.js, Vite, Turbopack, and other toolchains will remain optional integrations for cases where the host framework or bundler cannot honor the core Node interception path. The [v0.2 interception contract](INTERCEPTION.md) fixes the planned wrapper and resolution behavior; the current release still requires the direct `localbox/vercel` import shown above.
+```sh
+localbox -- node app.mjs
+```
+
+The wrapper requires Node.js 22.12 or newer and installs a process-scoped Node ESM resolution hook. Only the exact bare `@vercel/sandbox` specifier is redirected to `localbox/vercel`; ordinary execution without the wrapper continues to use the installed provider SDK.
+
+Direct Node.js ESM imports and the first wrapped Node process are verified. Further Node descendants participate when they inherit `NODE_OPTIONS`. CommonJS `require()` and alternate runtimes are unsupported; Next.js, Vite, Turbopack, and other bundler or framework resolution paths are unverified and have no bundled adapter. Containerized application callers remain outside this release and are tracked by [#20](https://github.com/eddielin0926/localbox/issues/20).
+
+Framework adapters, when a proven bypass requires one, are optional toolchain integrations outside Localbox's core dependencies. They must be explicitly enabled and must never silently select remote execution. See the [v0.2 interception contract](INTERCEPTION.md) for the complete toolchain matrix, evidence rules, diagnostics, and adapter boundary.
 
 ## API reference
 
@@ -247,6 +255,9 @@ Localbox is intended for local development and trusted workloads. Docker contain
 | `UnsupportedImageError` | Use an image containing `node` and `/bin/sh`. |
 | `PortNotExposedError` | Include the TCP port in `Sandbox.create({ ports })`. |
 | Image pull failure | Check the image name, registry access, and Docker credentials. |
+| `LOCALBOX_UNSUPPORTED_RUNTIME` | Switch to Node.js 22.12 or newer and retry. The wrapped command was not launched. |
+| `LOCALBOX_HOOK_SETUP_FAILED` | Inspect the preserved cause, repair the Localbox installation or Node hook configuration, and retry. The application was not started and the provider was not used as a fallback. |
+| Confirmed `LOCALBOX_TOOLCHAIN_BYPASS` | The named toolchain path does not participate in the Node hook. Use an explicit `localbox/vercel` import or an available opt-in adapter; absence of an observed provider import alone does not prove a bypass. |
 
 The SDK does not write unsolicited output to console or process streams. Read command output with `stdout()`, `stderr()`, `output()`, or `logs()`, or provide `Writable` streams to `runCommand`.
 

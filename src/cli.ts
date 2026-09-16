@@ -45,7 +45,8 @@ if (arguments_[0] !== "--") {
     failUsage("an executable is required after `--`");
   } else if (!supportedNode) {
     console.error(
-      `localbox: Node.js ${process.versions.node} is unsupported; Node.js >=22.12.0 is required`,
+      `localbox: [LOCALBOX_UNSUPPORTED_RUNTIME] Node.js ${process.versions.node} is unsupported; ` +
+        "Node.js >=22.12.0 is required. Switch Node.js versions and retry.",
     );
     process.exitCode = 1;
   } else {
