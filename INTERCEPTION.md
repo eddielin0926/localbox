@@ -2,6 +2,8 @@
 
 This document fixes the framework-neutral interception contract for Localbox v0.2. It is the implementation contract for [M1](ROADMAP.md#m1--development-interception-and-local-dx); the CLI and Node preload implement the core path, while the matrix below records its verified and unsupported boundaries.
 
+This contract describes the unreleased v0.2.0 source. The currently published v0.1.0 package does not contain the `localbox --` wrapper; its supported import remains `localbox/vercel`.
+
 ## Activation and command surface
 
 The v0.2 command form is:
@@ -44,13 +46,26 @@ Commands launched normally, without `localbox --`, resolve `@vercel/sandbox` thr
 
 | Caller or resolution path | Status | Behavior and action |
 | --- | --- | --- |
-| Direct Node.js ESM static import or dynamic `import()` of the exact bare `@vercel/sandbox` specifier | **Verified** | The packaged resolution test covers both forms. Run the application through `localbox --`; the import maps to `localbox/vercel`. |
-| The first Node.js process launched by the wrapper with inherited `NODE_OPTIONS` | **Verified** | The CLI process test covers the inherited preload and provider mapping. |
+| Direct Node.js ESM static import or dynamic `import()` of the exact bare `@vercel/sandbox` specifier | **Verified** | Packaged resolution tests cover both forms, and the packaged Docker smoke keeps the static application import unchanged. Run the application through `localbox --`; the import maps to `localbox/vercel`. |
+| The first host-launched Node.js process launched by the wrapper with inherited `NODE_OPTIONS` | **Verified end to end** | The CLI process test covers wrapper semantics. The packaged Docker smoke installs the package archive, launches its CLI artifact, creates a Localbox sandbox, performs a file-backed command, and deletes the sandbox. |
 | Further Node.js descendants, worker threads, `child_process.fork()` children, and cluster workers that preserve inherited `NODE_OPTIONS` | **Supported by documented Node behavior; not fully integration-tested** | Node preloads `--import` modules in these contexts. A descendant that deletes or replaces `NODE_OPTIONS` leaves the supported path. |
 | CommonJS `require("@vercel/sandbox")`, including an existing `--require` preload | **Unsupported** | CommonJS interception is outside v0.2. `--require` also runs before Localbox's `--import` preload. Use an explicit `localbox/vercel` import in development code that can do so; Localbox does not fall back remotely. |
 | Next.js, Vite, Turbopack, and other bundler or framework resolvers | **Unverified** | No core compatibility claim or adapter currently exists. Confirm the toolchain's resolution path before treating a result as a bypass; use `localbox/vercel` explicitly when acceptable. |
 | Bun, Deno, and other alternate JavaScript runtimes | **Unsupported** | The core hook uses Node's `node:module` API. |
-| Application callers running inside containers | **Unsupported** | Caller-to-host routing and an unchanged-application Docker scenario belong to [#20](https://github.com/eddielin0926/localbox/issues/20), not this interception layer. |
+| Application callers running inside containers | **Unsupported** | The verified topology launches the application on the host and uses Docker only for Localbox sandbox execution. Caller-to-host routing is outside v0.2. |
+
+## Packaged end-to-end evidence
+
+The Docker CI job keeps the direct-import smoke and runs the unchanged-import smoke separately:
+
+```sh
+pnpm smoke
+pnpm smoke:interception
+```
+
+`pnpm smoke` continues to execute [`examples/basic.mjs`](examples/basic.mjs) through `localbox/vercel`. `pnpm smoke:interception` packs the repository, installs that archive with the real `@vercel/sandbox@3.3.0` package in an isolated temporary application, and runs [`examples/interception/app.mjs`](examples/interception/app.mjs) through the packaged CLI. The fixture creates a uniquely named Docker sandbox, writes a file, reads it through a sandbox command, validates the result, and deletes the sandbox in `finally`.
+
+The external driver runs an ordinary provider-resolution probe before and immediately after the wrapped command. It verifies that both ordinary runs resolve inside the installed real provider package without invoking `Sandbox.create()` or contacting the remote service. It also verifies that the parent `NODE_OPTIONS` value is unchanged and that Docker has no container carrying the fixture's unique `dev.localbox.name` label. On any failure, the driver force-removes a remaining labeled container and removes its temporary package and application directories.
 
 ## Diagnostics
 

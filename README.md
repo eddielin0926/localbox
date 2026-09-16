@@ -4,7 +4,7 @@ Run cloud sandbox SDKs locally during development with Docker.
 
 Localbox is an open-source local development runtime for applications that depend on cloud sandbox SDKs. Its goal is to let those applications run locally with zero or near-zero application-code changes, initially for Vercel Sandbox on Docker.
 
-The current release provides a Vercel-compatible implementation through `localbox/vercel` and an opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. No hosted Localbox service, credentials, or configuration file is required.
+The published v0.1.0 release provides the Vercel-compatible `localbox/vercel` API. The repository's unreleased v0.2.0 work adds an opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. No hosted Localbox service, credentials, or configuration file is required for either local path.
 
 See [ROADMAP.md](ROADMAP.md) for planned compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
 
@@ -90,21 +90,35 @@ See [`examples/basic.mjs`](examples/basic.mjs) for a runnable example covering p
 
 ## Development interception
 
-Keep the application's provider import:
+The `localbox --` wrapper is present in this repository and is planned for v0.2.0; the currently published v0.1.0 package does not contain it. Until v0.2.0 is published, use a built or packed checkout when exercising interception.
+
+Keep the application's provider import unchanged:
 
 ```js
 import { Sandbox } from "@vercel/sandbox";
 ```
 
-Then explicitly wrap the development command:
+Explicitly wrap the host-launched Node.js development command to use Localbox:
 
 ```sh
 localbox -- node app.mjs
 ```
 
-The wrapper requires Node.js 22.12 or newer and installs a process-scoped Node ESM resolution hook. Only the exact bare `@vercel/sandbox` specifier is redirected to `localbox/vercel`; ordinary execution without the wrapper continues to use the installed provider SDK.
+Run the same application normally to retain the installed provider SDK's resolution and behavior:
 
-Direct Node.js ESM imports and the first wrapped Node process are verified. Further Node descendants participate when they inherit `NODE_OPTIONS`. CommonJS `require()` and alternate runtimes are unsupported; Next.js, Vite, Turbopack, and other bundler or framework resolution paths are unverified and have no bundled adapter. Containerized application callers remain outside this release and are tracked by [#20](https://github.com/eddielin0926/localbox/issues/20).
+```sh
+node app.mjs
+```
+
+The wrapper requires Node.js 22.12 or newer and installs a process-scoped Node ESM resolution hook. Only the exact bare `@vercel/sandbox` specifier is redirected to `localbox/vercel`. The supported topology is a host-installed Localbox CLI launching a host command whose Node.js processes inherit `NODE_OPTIONS`; Docker is the sandbox backend, not the application caller environment. Exiting the wrapped process leaves the parent environment and ordinary package resolution unchanged.
+
+Direct Node.js ESM imports and the first wrapped Node process are verified end to end through a packed Localbox archive against Docker. [`examples/interception/app.mjs`](examples/interception/app.mjs) keeps the provider import unchanged, creates a uniquely named sandbox, exercises a file and command, and deletes it. The external smoke driver probes the real installed `@vercel/sandbox` package before and immediately after wrapped execution without calling its remote service, and observes Docker state to confirm cleanup:
+
+```sh
+pnpm smoke:interception
+```
+
+Further Node descendants participate when they inherit `NODE_OPTIONS`, but are not fully integration-tested. CommonJS `require()` and alternate runtimes are unsupported. Next.js, Vite, Turbopack, and other bundler or framework resolution paths remain unverified and have no bundled adapter. Application callers running inside containers and caller-to-host routing remain unsupported.
 
 Framework adapters, when a proven bypass requires one, are optional toolchain integrations outside Localbox's core dependencies. They must be explicitly enabled and must never silently select remote execution. See the [v0.2 interception contract](INTERCEPTION.md) for the complete toolchain matrix, evidence rules, diagnostics, and adapter boundary.
 
@@ -199,7 +213,7 @@ Paths are relative to `/vercel/sandbox` unless absolute. Methods accept an `Abor
 
 ## Vercel compatibility
 
-Vercel Sandbox is Localbox's current compatibility target. The current release imports it from `localbox/vercel`; transparent development interception for `@vercel/sandbox` is planned, not shipped.
+Vercel Sandbox is Localbox's current compatibility target. The published v0.1.0 release imports it from `localbox/vercel`; the unreleased v0.2.0 source also supports explicit development interception for the unchanged `@vercel/sandbox` import.
 
 Compatibility is checked against `@vercel/sandbox@3.3.0`. The versioned [`compatibility.json`](src/vercel/compatibility.json) records each assessed method, its type compatibility, behavioral differences, and unsupported APIs. Run the report locally with:
 
@@ -213,7 +227,7 @@ The complete documented `Command` and `FileSystem` method sets in that manifest 
 
 | Area | Localbox behavior |
 | --- | --- |
-| Import | Uses `localbox/vercel`. |
+| Import | Published v0.1.0 uses `localbox/vercel`; unreleased v0.2.0 can intercept the unchanged `@vercel/sandbox` import only under `localbox --`. |
 | URLs | Exposed ports use loopback URLs; there is no public domain or reverse proxy. |
 | Isolation | Docker containers share the host kernel instead of using microVM isolation. |
 | Persistence | A stopped persistent container retains its writable layer; snapshots are not portable. |
@@ -270,6 +284,7 @@ pnpm typecheck
 pnpm test:unit
 pnpm test:integration
 pnpm smoke
+pnpm smoke:interception
 pnpm compatibility:vercel
 ```
 
