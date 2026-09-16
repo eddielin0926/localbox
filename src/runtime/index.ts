@@ -27,6 +27,15 @@ export type RequestMetadata = JsonObject & {
   readonly requestId: RequestId;
   readonly deadline: Deadline | null;
 };
+export type ProcessSignal =
+  | "SIGHUP"
+  | "SIGINT"
+  | "SIGQUIT"
+  | "SIGKILL"
+  | "SIGTERM"
+  | "SIGCONT"
+  | "SIGSTOP"
+  | number;
 
 export type MutationMetadata = RequestMetadata & {
   readonly idempotencyKey: IdempotencyKey;
@@ -250,6 +259,14 @@ export type CommandResult = JsonObject & {
 export type WaitForCommandResult = JsonObject & {
   readonly result: CommandResult;
 };
+export type SignalProcessRequest = MutationMetadata & ProcessReference & {
+  readonly signal: ProcessSignal;
+};
+
+export type SignalProcessResult = JsonObject & {
+  readonly process: ProcessRecord;
+};
+
 
 export type ReadCommandOutputRequest = RequestMetadata & ProcessReference & {
   readonly stream: OutputStream;
@@ -429,6 +446,7 @@ export interface SandboxClient {
 
   startCommand(request: StartCommandRequest): Promise<ClientResult<StartCommandResult>>;
   waitForCommand(request: WaitForCommandRequest): Promise<ClientResult<WaitForCommandResult>>;
+  signalProcess(request: SignalProcessRequest): Promise<ClientResult<SignalProcessResult>>;
   readCommandOutput(
     request: ReadCommandOutputRequest,
   ): Promise<ClientResult<ReadCommandOutputResult>>;

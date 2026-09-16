@@ -14,8 +14,8 @@ The `localbox/runtime` entry point defines the backend-neutral values exchanged 
 
 ## Current operation surface
 
-The asynchronous `SandboxClient` covers the behavior required by the current Vercel frontend: create/get/list/stop/delete and deadline extension; command start/wait/bounded output; file read/write and recursive directory creation; and resolution of a declared port to its loopback HTTP endpoint. The Vercel adapter remains responsible for provider conveniences such as generated names, callbacks, `Date` and `Buffer` conversion, async pagination, and blocking-versus-detached command behavior.
+The asynchronous `SandboxClient` covers the behavior required by the current Vercel frontend: create/get/list/stop/delete and deadline extension; command start/wait/bounded output and portable signal delivery; file read/write and recursive directory creation; and resolution of a declared port to its loopback HTTP endpoint. The Vercel adapter remains responsible for provider conveniences such as generated names, callbacks, `Date` and `Buffer` conversion, async pagination, request cancellation, and blocking-versus-detached command behavior.
 
 ## Intentional non-goals
 
-This contract does not implement an embedded runtime, Docker backend, transport server, RPC protocol, persistence, backend capability discovery, reconnection, live log streaming, cancellation or signal delivery, provider SDK types, or additional filesystem operations. Those behaviors require later M2 work or a demonstrated transport-neutral contract extension. It also does not change the development interception rules in [INTERCEPTION.md](INTERCEPTION.md).
+This contract does not implement an embedded runtime, Docker backend, transport server, RPC protocol, persistence, backend capability discovery, reconnection, live log streaming, transport-level cancellation, provider SDK types, or additional filesystem operations. Those behaviors require later M2 work or a demonstrated transport-neutral contract extension. It also does not change the development interception rules in [INTERCEPTION.md](INTERCEPTION.md).

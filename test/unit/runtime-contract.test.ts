@@ -7,6 +7,7 @@ import type {
   JsonValue,
   ReadCommandOutputResult,
   ReadFileResult,
+  SignalProcessRequest,
   UnsupportedRequirementDetails,
   WriteFileRequest,
 } from "../../src/runtime/index.js";
@@ -105,6 +106,15 @@ const outputResult = {
   complete: false,
   truncated: false,
 } as const satisfies ReadCommandOutputResult;
+const signalRequest = {
+  requestId: "req-signal-1",
+  idempotencyKey: "signal-process-1",
+  deadline: { expiresAt: 1_800_000_000_000 },
+  sandboxId: "sandbox-1",
+  processId: "process-1",
+  signal: "SIGTERM",
+} as const satisfies SignalProcessRequest;
+
 
 const writeRequest = {
   requestId: "req-write-1",
@@ -154,6 +164,7 @@ describe("runtime transport contract", () => {
       createRequest,
       createSuccess,
       outputResult,
+      signalRequest,
       writeRequest,
       readResult,
     ] satisfies readonly JsonValue[]) {
