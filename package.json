@@ -33,6 +33,10 @@
     "./vercel": {
       "types": "./dist/vercel/index.d.ts",
       "import": "./dist/vercel/index.js"
+    },
+    "./node-preload": {
+      "types": "./dist/interception/node-preload.d.ts",
+      "import": "./dist/interception/node-preload.js"
     }
   },
   "files": [
@@ -51,6 +55,7 @@
     "build": "node --eval \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test:unit": "vitest run test/unit",
+    "test:resolution": "vitest run test/package/node-resolution-hook.test.ts",
     "test:integration": "vitest run test/integration",
     "smoke": "node examples/basic.mjs",
     "compatibility:vercel": "node scripts/report-compatibility.mjs"

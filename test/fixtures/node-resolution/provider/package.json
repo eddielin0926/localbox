@@ -1,0 +1,8 @@
+{
+  "name": "@vercel/sandbox",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./subpath": "./subpath.js"
+  }
+}
