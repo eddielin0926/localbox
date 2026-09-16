@@ -7,10 +7,15 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: publish-vercel-images
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: Publish ${{ matrix.target }}
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -55,3 +60,10 @@ jobs:
           set: |
             ${{ matrix.target }}.tags=ghcr.io/eddielin0926/localbox-vercel:${{ matrix.tag }}-b99895b79dd346905166efd83bd86e73a9762c2e
             ${{ matrix.target }}.tags=ghcr.io/eddielin0926/localbox-vercel:${{ matrix.tag }}-latest
+            ${{ matrix.target }}.labels.org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            ${{ matrix.target }}.labels.org.opencontainers.image.description=Vercel-compatible development sandbox image for Localbox
+            ${{ matrix.target }}.labels.org.opencontainers.image.licenses=Apache-2.0
+            ${{ matrix.target }}.labels.org.opencontainers.image.revision=${{ github.sha }}
+            ${{ matrix.target }}.labels.dev.localbox.vercel.upstream-commit=b99895b79dd346905166efd83bd86e73a9762c2e
+            ${{ matrix.target }}.attest=type=provenance,mode=max
+            ${{ matrix.target }}.attest+=type=sbom

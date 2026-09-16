@@ -59,6 +59,18 @@ A useful pull request:
 
 Maintainers may ask for changes before merging. Reviews focus on correctness, compatibility, maintainability, and regression risk.
 
+## Release process
+
+Maintainers release from a clean `main` commit after its required CI checks pass:
+
+1. Update `package.json` and user-facing compatibility documentation in a focused release pull request.
+2. Run the manual `Publish Vercel-compatible images` workflow when managed-image sources or tags change, then confirm every image referenced by the package is publicly pullable.
+3. Confirm the npm `localbox` package trusts `.github/workflows/release.yml` through the `npm` GitHub environment, or configure the `NPM_TOKEN` environment secret for the first publish only.
+4. Create a GitHub release whose tag is exactly `v` plus the package version. Publishing the release triggers the npm workflow.
+5. Verify the npm version, GitHub tag and release commit, package provenance, and documented smoke path.
+
+Never publish a GitHub release while its npm authentication or required GHCR images are unavailable. A draft release is safe for preparing notes because it does not trigger publication.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).

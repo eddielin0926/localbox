@@ -44,6 +44,32 @@ Interception selects an implementation without defining provider semantics. Fron
 - Prefer PostgreSQL, an OCI registry, and S3-compatible object storage before introducing additional mandatory infrastructure.
 - Store local persistent state under `XDG_STATE_HOME` when it is set.
 
+## Delivery tracking
+
+GitHub milestones map roadmap outcomes to semantic releases. Dates stay unset until a milestone becomes active; dependency order, not an invented calendar, controls sequencing.
+
+| Roadmap milestone | Target release | Tracking issue |
+| --- | --- | --- |
+| M0 — Docker-backed Vercel baseline | `v0.1.0` | [#3](https://github.com/eddielin0926/localbox/issues/3) |
+| M1 — Development interception and local DX | `v0.2.0` | [#4](https://github.com/eddielin0926/localbox/issues/4) |
+| M2 — Neutral runtime and backend boundary | `v0.3.0` | [#5](https://github.com/eddielin0926/localbox/issues/5) |
+| M3 — Pluggable local backends | `v0.4.0` | [#6](https://github.com/eddielin0926/localbox/issues/6) |
+| M4 — Compatibility frontend framework | `v0.5.0` | [#7](https://github.com/eddielin0926/localbox/issues/7) |
+| M5 — Single-node Localbox service | `v0.6.0` | [#8](https://github.com/eddielin0926/localbox/issues/8) |
+| M6 — Distributed control plane and workers | `v0.7.0` | [#9](https://github.com/eddielin0926/localbox/issues/9) |
+| M7 — Kubernetes distribution | `v0.8.0` | [#10](https://github.com/eddielin0926/localbox/issues/10) |
+| M8 — AWS, Azure, and Google Cloud blueprints | `v0.9.0` | [#11](https://github.com/eddielin0926/localbox/issues/11) |
+| M9 — Hardened isolation and platform maturity | `v1.0.0` | [#12](https://github.com/eddielin0926/localbox/issues/12) |
+
+M0 through M3 are decomposed into implementation sub-issues. Later milestones remain outcome-level epics until their dependencies stabilize; decomposing them earlier would encode assumptions the neutral runtime and distributed architecture have not yet validated. GitHub blocked-by relationships record the critical path.
+
+Every release requires:
+
+- all milestone exit criteria and required CI checks to pass;
+- public, immutable GHCR tags for every managed image referenced by that version;
+- matching `package.json`, Git tag, npm package, and GitHub release versions; and
+- release notes that identify compatibility changes, unsupported behavior, and security-boundary changes.
+
 ## Milestones
 
 ### M0 — Docker-backed Vercel baseline
