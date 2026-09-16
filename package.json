@@ -33,6 +33,10 @@
     "./vercel": {
       "types": "./dist/vercel/index.d.ts",
       "import": "./dist/vercel/index.js"
+    },
+    "./node-preload": {
+      "types": "./dist/interception/node-preload.d.ts",
+      "import": "./dist/interception/node-preload.js"
     }
   },
   "files": [
