@@ -1,10 +1,12 @@
 # Localbox
 
-Run cloud-sandbox APIs locally with Docker.
+Run cloud sandbox SDKs locally during development with Docker.
 
-Localbox is a local runtime for cloud-sandbox APIs. Vercel Sandbox is the current compatibility target, exposed through `localbox/vercel`. No hosted Localbox service, credentials, CLI, or configuration file is required.
+Localbox is an open-source local development runtime for applications that depend on cloud sandbox SDKs. Its goal is to let those applications run locally with zero or near-zero application-code changes, initially for Vercel Sandbox on Docker.
 
-See [ROADMAP.md](ROADMAP.md) for the planned compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
+The current release provides a Vercel-compatible implementation through `localbox/vercel`; applications must import that entry point today. Transparent, opt-in development interception that preserves provider imports is planned and is not yet supported. No hosted Localbox service, credentials, CLI, or configuration file is required by the current release.
+
+See [ROADMAP.md](ROADMAP.md) for the planned development interception, compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
 
 ## Features
 
@@ -85,6 +87,18 @@ try {
 ```
 
 See [`examples/basic.mjs`](examples/basic.mjs) for a runnable example covering ports, persistence, and cleanup.
+
+## Development interception (planned)
+
+Localbox's target development experience preserves the application's provider import:
+
+```js
+import { Sandbox } from "@vercel/sandbox";
+```
+
+This mode will be explicitly enabled and development-only. The framework-neutral path will use a Localbox CLI process wrapper to install process-scoped Node module-resolution interception, selecting `localbox/vercel` only inside the wrapped process. Ordinary execution and production builds will continue to resolve the original provider SDK unless Localbox is explicitly enabled.
+
+Aliases or adapters for Next.js, Vite, Turbopack, and other toolchains will remain optional integrations for cases where the host framework or bundler cannot honor the core Node interception path. The wrapper and interception hook are planned; the current release still requires the direct `localbox/vercel` import shown above.
 
 ## API reference
 
@@ -177,7 +191,7 @@ Paths are relative to `/vercel/sandbox` unless absolute. Methods accept an `Abor
 
 ## Vercel compatibility
 
-Vercel Sandbox is Localbox's current compatibility target. Import it from `localbox/vercel`; Localbox is not a transparent replacement for `@vercel/sandbox`.
+Vercel Sandbox is Localbox's current compatibility target. The current release imports it from `localbox/vercel`; transparent development interception for `@vercel/sandbox` is planned, not shipped.
 
 Compatibility is checked against `@vercel/sandbox@3.3.0`. The versioned [`compatibility.json`](src/vercel/compatibility.json) records each assessed method, its type compatibility, behavioral differences, and unsupported APIs. Run the report locally with:
 

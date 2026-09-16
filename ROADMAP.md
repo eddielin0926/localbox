@@ -1,32 +1,38 @@
 # Localbox roadmap
 
-Localbox aims to provide provider-compatible sandbox APIs that run locally or on infrastructure the user controls. The same compatibility frontend should work with an embedded local runtime, a single-node service, or a distributed deployment on AWS, Azure, or Google Cloud.
+Localbox aims to let cloud-sandbox-dependent applications run locally during development while preserving provider imports wherever interception is technically possible. The current baseline exposes a Vercel-compatible frontend through `localbox/vercel` and executes with Docker; later milestones add explicit development interception, more frontends and backends, and deployment modes ranging from embedded use to distributed infrastructure on AWS, Azure, or Google Cloud.
 
 This roadmap describes direction rather than release dates. Milestones are ordered by dependency; scope may move as compatibility targets and upstream SDKs evolve.
 
 ## Architecture
 
-Localbox has three independent extension axes:
+Localbox separates four independently replaceable concerns:
 
-1. **Compatibility frontends** translate APIs such as Vercel Sandbox, Cloudflare Sandbox, E2B, and Daytona into Localbox operations.
-2. **Isolation backends** execute sandboxes through process, bwrap, container engines, Apple container, Incus, Kubernetes, or microVMs.
-3. **Deployment targets** provision and operate Localbox locally, on Kubernetes, or in AWS, Azure, and Google Cloud.
+1. **Development interception** is an explicit, process-scoped development choice that selects a local compatibility implementation for an application import such as `@vercel/sandbox`.
+2. **Compatibility frontends** reproduce provider SDK semantics and translate APIs such as Vercel Sandbox, Cloudflare Sandbox, E2B, and Daytona into the Localbox sandbox client contract.
+3. **Execution runtime and isolation backends** implement that contract through an embedded runtime or remote control plane, then execute sandboxes through process, bwrap, container engines, Apple container, Incus, Kubernetes, or microVMs.
+4. **Deployment infrastructure** hosts embedded or local execution and, later, single-node services, remote workers, Kubernetes installations, or cloud deployments.
 
 The intended request path is:
 
 ```text
-Compatibility frontend
-  -> sandbox client contract
-    -> embedded runtime, or remote control plane
-      -> worker supervisor
-        -> isolation backend
-          -> sandbox
+Application using a provider import
+  -> opt-in development interception
+    -> compatibility frontend
+      -> sandbox client contract
+        -> embedded runtime, or remote control plane
+          -> worker supervisor
+            -> isolation backend
+              -> sandbox
 ```
 
-Frontends define API semantics. The client contract defines transport-safe operations. The control plane decides placement. Workers reconcile desired and observed state. Backends provide isolation. Deployment modules provision the infrastructure.
+Interception selects an implementation without defining provider semantics. Frontends define those semantics. The client contract defines transport-safe operations. The runtime or control plane manages lifecycle and placement. Workers reconcile desired and observed state. Backends provide isolation. Deployment modules provision and operate the infrastructure.
 
 ## Principles
 
+- Never activate interception by default.
+- Never mutate installed provider packages or application source to enable interception.
+- Never change provider-package resolution in ordinary or production execution unless Localbox is explicitly enabled.
 - Keep compatibility frontends independent from isolation backends.
 - Preserve one observable behavior contract in embedded and remote modes.
 - Keep core requests, results, process events, and backend references serializable.
@@ -58,7 +64,26 @@ Exit criteria:
 - The documented Docker workflow remains the behavioral baseline for subsequent milestones.
 - Compatibility differences remain explicit and machine-readable.
 
-### M1 — Neutral runtime and backend boundary
+### M1 — Development interception and local DX
+
+Provide the first opt-in path for running an unchanged Node development application against Localbox.
+
+Deliverables:
+
+- An explicit Localbox CLI process wrapper that installs a process-scoped Node module-resolution hook.
+- A narrowly scoped mapping from `@vercel/sandbox` to `localbox/vercel`; no other package resolution changes.
+- Continued support for direct `localbox/vercel` imports.
+- Actionable diagnostics when the hook cannot be installed or when a framework or bundler resolves modules outside it.
+- Optional framework adapters or aliases, isolated from the framework-neutral core and used only when a host toolchain cannot honor the Node hook.
+
+Exit criteria:
+
+- An unmodified Node development application importing `@vercel/sandbox` runs against Docker when launched through Localbox.
+- The same application resolves the real Vercel package when launched normally.
+- Exiting the wrapped process leaves no interception state behind.
+- The existing direct-import smoke path still passes.
+
+### M2 — Neutral runtime and backend boundary
 
 Extract Docker from the compatibility frontend without changing public behavior.
 
@@ -78,7 +103,7 @@ Exit criteria:
 - `localbox/vercel` passes its existing observable behavior checks through the neutral runtime.
 - A backend can be selected through runtime construction without mutable global configuration.
 
-### M2 — Pluggable local backends
+### M3 — Pluggable local backends
 
 Prove that the backend boundary supports materially different execution models.
 
@@ -99,9 +124,9 @@ Exit criteria:
 - Multiple backend instances can coexist in one process.
 - Documentation states the security boundary of every backend.
 
-Follow-on backend tracks after this milestone include Apple container and Incus. Firecracker and Cloud Hypervisor wait for the guest-agent and distributed-worker foundations.
+Follow-on backend tracks after M3 include Apple container and Incus. Firecracker and Cloud Hypervisor remain M9 work, after the M6 distributed-worker foundation and alongside the guest-agent protocol.
 
-### M3 — Compatibility frontend framework
+### M4 — Compatibility frontend framework
 
 Make provider API compatibility an explicit layer over the sandbox client contract.
 
@@ -122,7 +147,7 @@ Exit criteria:
 - Shell-command, direct-argv, completion-result, and process-handle APIs preserve their distinct observable semantics.
 - Cloud control-plane options are rejected or documented as not applicable; they are never silently accepted.
 
-### M4 — Single-node Localbox service
+### M5 — Single-node Localbox service
 
 Run the same runtime behind a durable remote API on one machine.
 
@@ -143,7 +168,7 @@ Exit criteria:
 - Retried create, stop, delete, and signal requests are idempotent.
 - Workers and sandbox administration endpoints do not require public exposure.
 
-### M5 — Distributed control plane and workers
+### M6 — Distributed control plane and workers
 
 Separate scheduling and API responsibilities from workload execution.
 
@@ -165,7 +190,7 @@ Exit criteria:
 - Placement refuses workers that cannot satisfy requested isolation or resource capabilities.
 - Process logs and lifecycle state survive client and control-plane reconnects.
 
-### M6 — Kubernetes distribution
+### M7 — Kubernetes distribution
 
 Provide a portable production deployment and a Kubernetes-native execution option.
 
@@ -185,7 +210,7 @@ Exit criteria:
 - Sandboxes remain private unless a frontend explicitly exposes an endpoint.
 - The Kubernetes backend passes its applicable backend conformance profile.
 
-### M7 — AWS, Azure, and Google Cloud blueprints
+### M8 — AWS, Azure, and Google Cloud blueprints
 
 Make production self-hosting repeatable in each major cloud without creating three different Localbox architectures.
 
@@ -205,7 +230,7 @@ Exit criteria:
 - Workers run in private networks and connect outbound to the control plane.
 - Provider modules expose the same logical inputs and outputs where cloud services permit.
 
-### M8 — Hardened isolation and platform maturity
+### M9 — Hardened isolation and platform maturity
 
 Support hostile workloads and specialized execution without weakening simpler deployment modes.
 
@@ -238,6 +263,14 @@ These tracks continue across milestones rather than waiting for a single release
 - Test observable behavior rather than source shape.
 - Document why unsupported cloud control-plane features are not applicable locally.
 
+### Developer experience
+
+- Keep the interception contract stable as compatibility frontends and provider SDKs evolve.
+- Require explicit development opt-in and actionable diagnostics in every interception mode.
+- Leave ordinary and production resolution on the original provider SDK unless Localbox is explicitly enabled.
+- Ship framework and bundler adapters or aliases as optional packages; the core runtime must not depend on them.
+- Fail with guidance when a toolchain bypasses the supported interception path; never silently fall back to remote execution.
+
 ### Security
 
 - Maintain an explicit threat model for each backend and deployment profile.
@@ -261,6 +294,20 @@ Avoid a full frontend-by-backend Cartesian test matrix:
 3. Selected frontend/backend pairs receive integration coverage for capability-sensitive behavior.
 4. Embedded and remote modes run the same observable frontend scenarios.
 5. Cloud blueprints run one shared deployment conformance scenario.
+
+## Implementation research references
+
+These projects and services are inputs for implementation research only. Listing them does not promise a dependency, compatibility target, or adoption:
+
+- **Vercel Sandbox** — provider SDK semantics for the current compatibility frontend.
+- **contember/edvabe** — local interception and developer-experience patterns.
+- **Cloudflare Sandbox and Miniflare** — provider SDK semantics and local development behavior.
+- **LocalStack and Overcast** — local interception and developer-experience patterns for redirecting cloud-facing applications.
+- **E2B Runtime** — execution isolation and backend abstraction.
+- **Trigger.dev** — self-hosted control-plane and worker-operation patterns.
+- **Supabase CLI** — opt-in local developer experience and lifecycle management.
+- **Microsandbox** — execution isolation and backend abstraction.
+- **AML sandbox providers** — provider SDK semantics and backend capability modeling.
 
 ## Out of scope until required by a milestone
 
