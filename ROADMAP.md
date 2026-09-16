@@ -96,7 +96,7 @@ Provide the first opt-in path for running an unchanged Node development applicat
 
 Deliverables:
 
-- An explicit Localbox CLI process wrapper that installs a process-scoped Node module-resolution hook.
+- An explicit Localbox CLI process wrapper that installs a process-scoped Node module-resolution hook according to the [v0.2 interception contract](INTERCEPTION.md).
 - A narrowly scoped mapping from `@vercel/sandbox` to `localbox/vercel`; no other package resolution changes.
 - Continued support for direct `localbox/vercel` imports.
 - Actionable diagnostics when the hook cannot be installed or when a framework or bundler resolves modules outside it.
