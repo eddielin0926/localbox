@@ -1,0 +1,21 @@
+packages: []
+
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false
+
+catalog:
+  dockerode: 5.0.1
+  typescript: 7.0.2
+  typescript-language-server: 6.0.0
+  "@vercel/sandbox": 3.3.0
+  vitest: 5.0.1
+  "@types/node": 22.20.3
+  "@types/dockerode": 4.0.1
+
+minimumReleaseAgeExclude:
+  - '@types/node@22.20.3'
+  - '@vitest/mocker@5.0.1'
+  - '@vitest/spy@5.0.1'
+  - vitest@5.0.1

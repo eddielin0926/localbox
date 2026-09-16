@@ -1,0 +1,42 @@
+{
+  "name": "localbox",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "packageManager": "pnpm@12.3.4",
+  "exports": {
+    "./vercel": {
+      "types": "./dist/vercel/index.d.ts",
+      "import": "./dist/vercel/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "src/vercel/compatibility.json",
+    "scripts/report-compatibility.mjs"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "node --eval \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration",
+    "smoke": "node examples/basic.mjs",
+    "compatibility:vercel": "node scripts/report-compatibility.mjs"
+  },
+  "dependencies": {
+    "dockerode": "catalog:"
+  },
+  "devDependencies": {
+    "@types/dockerode": "catalog:",
+    "@types/node": "catalog:",
+    "@vercel/sandbox": "catalog:",
+    "typescript": "catalog:",
+    "typescript-language-server": "catalog:",
+    "vitest": "catalog:"
+  }
+}
