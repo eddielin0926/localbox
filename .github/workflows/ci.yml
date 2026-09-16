@@ -85,3 +85,6 @@ jobs:
 
       - name: Run end-to-end smoke example
         run: pnpm smoke
+
+      - name: Run packaged unchanged-import interception smoke
+        run: pnpm smoke:interception
