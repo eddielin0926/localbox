@@ -4,6 +4,8 @@ Run cloud-sandbox APIs locally with Docker.
 
 Localbox is a local runtime for cloud-sandbox APIs. Vercel Sandbox is the current compatibility target, exposed through `localbox/vercel`. No hosted Localbox service, credentials, CLI, or configuration file is required.
 
+See [ROADMAP.md](ROADMAP.md) for the planned compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
+
 ## Features
 
 - Create, stop, resume, list, and delete named Docker sandboxes.
