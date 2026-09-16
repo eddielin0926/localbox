@@ -20,15 +20,18 @@ import {
   translateDockerError,
 } from "../core/docker.js";
 import {
-  DockerUnavailableError,
   InvalidSandboxOptionsError,
+  LocalboxError,
   PortNotExposedError,
   SandboxAlreadyExistsError,
   SandboxDeletedError,
   SandboxNotFoundError,
+  SandboxSourceError,
   UnsupportedImageError,
+  UnsupportedSandboxCapabilityError,
 } from "./errors.js";
 import { createFileSystem, FileSystem } from "./filesystem.js";
+import { resolveSandboxImage } from "./managed-images.js";
 import type {
   SandboxCreateOptions,
   SandboxGetOptions,
@@ -38,11 +41,11 @@ import type {
   SandboxListPage,
   SandboxListResult,
   SandboxPath,
+  SandboxSource,
   SandboxStatus,
   WriteFileSpec,
 } from "./types.js";
 
-const DEFAULT_IMAGE = "node:24-bookworm-slim";
 const DEFAULT_TIMEOUT = 300_000;
 const WORKSPACE = "/vercel/sandbox";
 const LABEL_PREFIX = "dev.localbox";
@@ -91,22 +94,76 @@ try {
 process.stdout.write(String(next));
 `;
 
+const GIT_ASKPASS = String.raw`#!/bin/sh
+case "$1" in
+  *sername*) printf '%s\n' "$LOCALBOX_GIT_USERNAME" ;;
+  *) printf '%s\n' "$LOCALBOX_GIT_PASSWORD" ;;
+esac
+`;
+
+const EXTRACT_TARBALL = String.raw`
+import { createWriteStream } from "node:fs";
+import { rm } from "node:fs/promises";
+import { posix } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { spawnSync } from "node:child_process";
+const [url, workspace] = process.argv.slice(1);
+const archive = "/tmp/localbox-source-" + process.pid + ".tar";
+try {
+  const response = await fetch(url, { redirect: "follow" });
+  if (!response.ok || response.body === null) {
+    throw new Error("Source download returned HTTP " + response.status);
+  }
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(archive, { mode: 0o600 }));
+  const listing = spawnSync("tar", ["-tf", archive], { encoding: "utf8" });
+  if (listing.status !== 0) throw new Error(listing.stderr || "Could not inspect source archive");
+  for (const entry of listing.stdout.split("\n").filter(Boolean)) {
+    const normalized = posix.normalize(entry);
+    if (posix.isAbsolute(entry) || normalized === ".." || normalized.startsWith("../")) {
+      throw new Error("Source archive contains a path outside the workspace");
+    }
+  }
+  const extracted = spawnSync("tar", ["-xf", archive, "-C", workspace], { encoding: "utf8" });
+  if (extracted.status !== 0) throw new Error(extracted.stderr || "Could not extract source archive");
+} finally {
+  await rm(archive, { force: true });
+}
+`;
+
+type MaterializableSource = Exclude<SandboxSource, { type: "snapshot" }>;
+
 interface NormalizedCreateOptions {
   name: string;
   image: string;
+  runtime?: string;
   ports: number[];
   timeout: number;
   env: Record<string, string>;
+  tags: Record<string, string>;
+  region?: string;
+  failoverRegions: string[];
   persistent: boolean;
+  networkMode: "bridge" | "none";
+  disconnectNetworkAfterSource: boolean;
+  source?: MaterializableSource;
+  vcpus?: number;
+  memoryBytes?: number;
   signal?: AbortSignal;
 }
 
 interface SandboxMetadata {
   name: string;
   image: string;
+  runtime?: string;
   ports: number[];
   timeout: number;
   persistent: boolean;
+  tags: Record<string, string>;
+  region?: string;
+  failoverRegions: string[];
+  vcpus?: number;
+  memoryBytes?: number;
   createdAt: Date;
 }
 
@@ -140,19 +197,45 @@ function validateName(name: string): void {
   }
 }
 
+function validateOptionalText(value: string | undefined, field: string): void {
+  if (value !== undefined && (value.trim().length === 0 || value.includes("\0"))) {
+    throw new InvalidSandboxOptionsError(`${field} must not be empty or contain NUL.`);
+  }
+}
+
+function normalizeSource(source: SandboxSource | undefined): MaterializableSource | undefined {
+  if (source === undefined) return undefined;
+  if (source.type === "snapshot") {
+    throw new UnsupportedSandboxCapabilityError("snapshot sources");
+  }
+  if (source.type === "git") {
+    validateOptionalText(source.url, "Git source URL");
+    validateOptionalText(source.revision, "Git source revision");
+    if (source.depth !== undefined && (!Number.isInteger(source.depth) || source.depth < 1)) {
+      throw new InvalidSandboxOptionsError("Git source depth must be a positive integer.");
+    }
+    if ("username" in source) {
+      validateOptionalText(source.username, "Git source username");
+      if (source.password.includes("\0")) {
+        throw new InvalidSandboxOptionsError("Git source password must not contain NUL.");
+      }
+    }
+    return source;
+  }
+  if (source.type === "tarball") {
+    validateOptionalText(source.url, "Tarball source URL");
+    return source;
+  }
+  throw new InvalidSandboxOptionsError("Sandbox source type is invalid.");
+}
+
 function normalizeCreateOptions(options: SandboxCreateOptions = {}): NormalizedCreateOptions {
   const name = options.name ?? `localbox-${randomUUID()}`;
   validateName(name);
-  if (options.image !== undefined && options.runtime !== undefined) {
-    throw new InvalidSandboxOptionsError("Choose either image or runtime, not both.");
-  }
-  if (options.runtime !== undefined && options.runtime !== "node24") {
-    throw new InvalidSandboxOptionsError(`Unsupported runtime "${String(options.runtime)}". Use node24 or a custom image.`);
-  }
-  const image = options.image ?? DEFAULT_IMAGE;
-  if (image.trim().length === 0) {
-    throw new InvalidSandboxOptionsError("Sandbox image must not be empty.");
-  }
+  const image = resolveSandboxImage({
+    ...(options.image === undefined ? {} : { image: options.image }),
+    ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
+  });
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
   if (!Number.isFinite(timeout) || !Number.isInteger(timeout) || timeout <= 0) {
     throw new InvalidSandboxOptionsError("Sandbox timeout must be a positive finite integer in milliseconds.");
@@ -173,23 +256,213 @@ function normalizeCreateOptions(options: SandboxCreateOptions = {}): NormalizedC
   }
 
   const env = { ...options.env };
-  for (const key of Object.keys(env)) {
+  for (const [key, value] of Object.entries(env)) {
     if (key.length === 0 || key.includes("=") || key.includes("\0") || key.startsWith("LOCALBOX_")) {
       throw new InvalidSandboxOptionsError(
         `Invalid environment key "${key}". Keys must be non-empty, omit = and NUL, and not use LOCALBOX_.`,
       );
     }
+    if (value.includes("\0")) {
+      throw new InvalidSandboxOptionsError(`Environment value for "${key}" must not contain NUL.`);
+    }
+  }
+
+  const tags = { ...options.tags };
+  if (Object.keys(tags).length > 5) {
+    throw new InvalidSandboxOptionsError("A sandbox can have at most 5 tags.");
+  }
+  for (const [key, value] of Object.entries(tags)) {
+    if (key.trim().length === 0 || key.includes("\0") || value.includes("\0")) {
+      throw new InvalidSandboxOptionsError("Sandbox tag keys must be non-empty and tag values must omit NUL.");
+    }
+  }
+
+  const region = options.region;
+  validateOptionalText(region, "Sandbox region");
+  const failoverRegions = options.failoverRegions === undefined ? [] : [...options.failoverRegions];
+  for (const failoverRegion of failoverRegions) validateOptionalText(failoverRegion, "Sandbox failover region");
+  if (new Set(failoverRegions).size !== failoverRegions.length) {
+    throw new InvalidSandboxOptionsError("Sandbox failover regions must be unique.");
+  }
+  if (region !== undefined && failoverRegions.includes(region)) {
+    throw new InvalidSandboxOptionsError("Sandbox failover regions must not include the primary region.");
+  }
+
+  if (options.mounts !== undefined && Object.keys(options.mounts).length > 0) {
+    throw new UnsupportedSandboxCapabilityError("drive mounts");
+  }
+  if (options.snapshotExpiration !== undefined || options.keepLastSnapshots !== undefined) {
+    throw new UnsupportedSandboxCapabilityError("snapshot retention");
+  }
+  if (typeof options.networkPolicy === "object") {
+    throw new UnsupportedSandboxCapabilityError("custom network policies");
+  }
+
+  const vcpus = options.resources?.vcpus;
+  if (vcpus !== undefined && (!Number.isFinite(vcpus) || !Number.isInteger(vcpus) || vcpus <= 0)) {
+    throw new InvalidSandboxOptionsError("Sandbox vCPUs must be a positive finite integer.");
+  }
+  const source = normalizeSource(options.source);
+  const denyNetwork = options.networkPolicy === "deny-all";
+  if (denyNetwork && ports.length > 0) {
+    throw new UnsupportedSandboxCapabilityError("simultaneous deny-all networking and exposed ports");
   }
   throwIfAborted(options.signal);
   return {
     name,
     image,
+    ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
     ports,
     timeout,
     env,
+    tags,
+    ...(region === undefined ? {} : { region }),
+    failoverRegions,
     persistent: options.persistent ?? true,
+    networkMode: denyNetwork && source === undefined ? "none" : "bridge",
+    disconnectNetworkAfterSource: denyNetwork && source !== undefined,
+    ...(source === undefined ? {} : { source }),
+    ...(vcpus === undefined
+      ? {}
+      : {
+          vcpus,
+          memoryBytes: vcpus * 2_048 * 1_048_576,
+        }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
+}
+
+async function runSourceCommand(
+  container: Dockerode.Container,
+  sourceType: "git" | "tarball",
+  options: {
+    cmd: string[];
+    env?: string[];
+    stdin?: Buffer;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  try {
+    const result = await rawExec(container, options);
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr.toString("utf8").trim() || `Source command exited with ${result.exitCode}.`);
+    }
+  } catch (error) {
+    if (error instanceof SandboxSourceError) throw error;
+    throw new SandboxSourceError(sourceType, error);
+  }
+}
+
+async function clearWorkspace(
+  container: Dockerode.Container,
+  sourceType: "git" | "tarball",
+  signal?: AbortSignal,
+): Promise<void> {
+  await runSourceCommand(container, sourceType, {
+    cmd: [
+      "/bin/sh",
+      "-c",
+      `find ${WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +`,
+    ],
+    ...(signal === undefined ? {} : { signal }),
+  });
+}
+
+async function materializeGitSource(
+  container: Dockerode.Container,
+  source: Extract<MaterializableSource, { type: "git" }>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const authenticated = "username" in source;
+  const askpassPath = "/tmp/localbox-git-askpass";
+  const env = [
+    "GIT_TERMINAL_PROMPT=0",
+    ...(authenticated
+      ? [
+          `GIT_ASKPASS=${askpassPath}`,
+          "GIT_ASKPASS_REQUIRE=force",
+          `LOCALBOX_GIT_USERNAME=${source.username}`,
+          `LOCALBOX_GIT_PASSWORD=${source.password}`,
+        ]
+      : []),
+  ];
+  try {
+    if (authenticated) {
+      await runSourceCommand(container, "git", {
+        cmd: ["/bin/sh", "-c", `cat > ${askpassPath} && chmod 0700 ${askpassPath}`],
+        stdin: Buffer.from(GIT_ASKPASS),
+        ...(signal === undefined ? {} : { signal }),
+      });
+    }
+    if (source.revision === undefined) {
+      await runSourceCommand(container, "git", {
+        cmd: [
+          "git",
+          "clone",
+          ...(source.depth === undefined ? [] : [`--depth=${source.depth}`]),
+          "--",
+          source.url,
+          WORKSPACE,
+        ],
+        env,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      return;
+    }
+
+    await runSourceCommand(container, "git", {
+      cmd: ["git", "-C", WORKSPACE, "init"],
+      env,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    await runSourceCommand(container, "git", {
+      cmd: ["git", "-C", WORKSPACE, "remote", "add", "origin", source.url],
+      env,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    await runSourceCommand(container, "git", {
+      cmd: [
+        "git",
+        "-C",
+        WORKSPACE,
+        "fetch",
+        "--no-tags",
+        ...(source.depth === undefined ? [] : [`--depth=${source.depth}`]),
+        "origin",
+        source.revision,
+      ],
+      env,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    await runSourceCommand(container, "git", {
+      cmd: ["git", "-C", WORKSPACE, "checkout", "--detach", "FETCH_HEAD"],
+      env,
+      ...(signal === undefined ? {} : { signal }),
+    });
+  } finally {
+    if (authenticated) {
+      await rawExec(container, {
+        cmd: ["rm", "-f", askpassPath],
+        ...(signal === undefined ? {} : { signal }),
+      }).catch(() => undefined);
+    }
+  }
+}
+
+async function materializeSource(
+  container: Dockerode.Container,
+  source: MaterializableSource,
+  signal?: AbortSignal,
+): Promise<void> {
+  await clearWorkspace(container, source.type, signal);
+  if (source.type === "git") {
+    await materializeGitSource(container, source, signal);
+    return;
+  }
+  await runSourceCommand(container, "tarball", {
+    cmd: ["node", "--input-type=module", "-e", EXTRACT_TARBALL, source.url, WORKSPACE],
+    ...(signal === undefined ? {} : { signal }),
+  });
 }
 
 function metadataFromInspect(name: string, info: Dockerode.ContainerInspectInfo): SandboxMetadata {
@@ -199,12 +472,26 @@ function metadataFromInspect(name: string, info: Dockerode.ContainerInspectInfo)
   }
   const timeout = Number(labels[`${LABEL_PREFIX}.timeout`]);
   const ports = JSON.parse(labels[`${LABEL_PREFIX}.ports`] ?? "[]") as number[];
+  const tags = JSON.parse(labels[`${LABEL_PREFIX}.tags`] ?? "{}") as Record<string, string>;
+  const failoverRegions = JSON.parse(labels[`${LABEL_PREFIX}.failoverRegions`] ?? "[]") as string[];
+  const nanoCpus = info.HostConfig.NanoCpus ?? 0;
+  const memoryBytes = info.HostConfig.Memory ?? 0;
   return {
     name,
     image: labels[`${LABEL_PREFIX}.image`] ?? info.Config.Image,
+    ...(labels[`${LABEL_PREFIX}.runtime`] === undefined
+      ? {}
+      : { runtime: labels[`${LABEL_PREFIX}.runtime`] }),
     ports,
     timeout,
     persistent: labels[`${LABEL_PREFIX}.persistent`] === "true",
+    tags,
+    ...(labels[`${LABEL_PREFIX}.region`] === undefined
+      ? {}
+      : { region: labels[`${LABEL_PREFIX}.region`] }),
+    failoverRegions,
+    ...(nanoCpus > 0 ? { vcpus: nanoCpus / 1_000_000_000 } : {}),
+    ...(memoryBytes > 0 ? { memoryBytes } : {}),
     createdAt: new Date(labels[`${LABEL_PREFIX}.created`] ?? info.Created),
   };
 }
@@ -274,10 +561,7 @@ function listItemFromInspect(info: Dockerode.ContainerInspectInfo): SandboxListI
     info.State.Running ? info.State.StartedAt : info.State.FinishedAt,
     createdAt,
   );
-  const tagsValue = info.Config.Labels[`${LABEL_PREFIX}.tags`];
-  const tags = tagsValue === undefined
-    ? undefined
-    : JSON.parse(tagsValue) as Record<string, string>;
+  const tags = Object.keys(metadata.tags).length === 0 ? undefined : metadata.tags;
   const nanoCpus = info.HostConfig.NanoCpus ?? 0;
   const memoryBytes = info.HostConfig.Memory ?? 0;
   return {
@@ -332,8 +616,14 @@ export class Sandbox {
   readonly name: string;
   readonly persistent: boolean;
   readonly image: string;
+  readonly runtime: string | undefined;
   readonly ports: readonly number[];
   readonly timeout: number;
+  readonly tags: Readonly<Record<string, string>>;
+  readonly region: string;
+  readonly failoverRegions: readonly string[];
+  readonly vcpus: number | undefined;
+  readonly memory: number | undefined;
   readonly createdAt: Date;
   readonly fs: FileSystem;
   readonly #container: Dockerode.Container;
@@ -356,8 +646,14 @@ export class Sandbox {
     this.name = metadata.name;
     this.persistent = metadata.persistent;
     this.image = metadata.image;
+    this.runtime = metadata.runtime;
     this.ports = Object.freeze([...metadata.ports]);
     this.timeout = metadata.timeout;
+    this.tags = Object.freeze({ ...metadata.tags });
+    this.region = metadata.region ?? "local";
+    this.failoverRegions = Object.freeze([...metadata.failoverRegions]);
+    this.vcpus = metadata.vcpus;
+    this.memory = metadata.memoryBytes === undefined ? undefined : metadata.memoryBytes / 1_048_576;
     this.createdAt = metadata.createdAt;
     this.#status = mapStatus(info);
     this.#portMap = portMapFromInspect(info, this.ports);
@@ -392,12 +688,12 @@ export class Sandbox {
         translateDockerError(error);
       }
     }));
-    const tagFilter = Object.entries(options.tags ?? {})[0];
+    const tagFilters = Object.entries(options.tags ?? {});
     const items = inspected
       .filter((info): info is Dockerode.ContainerInspectInfo => info !== undefined)
       .map(listItemFromInspect)
       .filter((item) => options.namePrefix === undefined || item.name.startsWith(options.namePrefix))
-      .filter((item) => tagFilter === undefined || item.tags?.[tagFilter[0]] === tagFilter[1]);
+      .filter((item) => tagFilters.every(([key, value]) => item.tags?.[key] === value));
     const direction = options.sortOrder === "asc" ? 1 : -1;
     const sortBy = options.sortBy ?? "createdAt";
     items.sort((left, right) => {
@@ -409,7 +705,7 @@ export class Sandbox {
   }
 
   static async create(options: SandboxCreateOptions = {}): Promise<Sandbox> {
-    return Sandbox.#create(options);
+    return Sandbox.#create(options, undefined, options.onResume);
   }
 
   static async get(options: SandboxGetOptions): Promise<Sandbox> {
@@ -476,7 +772,7 @@ export class Sandbox {
         Image: normalized.image,
         Entrypoint: ["node"],
         Cmd: ["--input-type=module", "-e", WATCHDOG, String(normalized.timeout)],
-        WorkingDir: WORKSPACE,
+        WorkingDir: "/vercel",
         Env: Object.entries(normalized.env).map(([key, value]) => `${key}=${value}`),
         Labels: {
           [`${LABEL_PREFIX}.managed`]: "true",
@@ -486,13 +782,27 @@ export class Sandbox {
           [`${LABEL_PREFIX}.timeout`]: String(normalized.timeout),
           [`${LABEL_PREFIX}.created`]: createdAt.toISOString(),
           [`${LABEL_PREFIX}.ports`]: JSON.stringify(normalized.ports),
+          [`${LABEL_PREFIX}.tags`]: JSON.stringify(normalized.tags),
+          [`${LABEL_PREFIX}.failoverRegions`]: JSON.stringify(normalized.failoverRegions),
+          ...(normalized.runtime === undefined
+            ? {}
+            : { [`${LABEL_PREFIX}.runtime`]: normalized.runtime }),
+          ...(normalized.region === undefined
+            ? {}
+            : { [`${LABEL_PREFIX}.region`]: normalized.region }),
         },
         ExposedPorts: exposedPorts,
         HostConfig: {
           AutoRemove: !normalized.persistent,
-          NetworkMode: "bridge",
+          NetworkMode: normalized.networkMode,
           PortBindings: portBindings,
           SecurityOpt: ["no-new-privileges"],
+          ...(normalized.vcpus === undefined
+            ? {}
+            : {
+                NanoCpus: normalized.vcpus * 1_000_000_000,
+                Memory: normalized.vcpus * 2_048 * 1_048_576,
+              }),
         },
         ...(normalized.signal === undefined ? {} : { abortSignal: normalized.signal }),
       });
@@ -505,17 +815,23 @@ export class Sandbox {
     try {
       await container.start(normalized.signal === undefined ? undefined : { abortSignal: normalized.signal });
       await Sandbox.#waitUntilReady(container, normalized.image, normalized.signal);
+      if (normalized.source !== undefined) {
+        await materializeSource(container, normalized.source, normalized.signal);
+      }
+      if (normalized.disconnectNetworkAfterSource) {
+        try {
+          await docker.getNetwork("bridge").disconnect({
+            Container: container.id,
+            Force: true,
+          });
+        } catch {
+          throw new UnsupportedSandboxCapabilityError("deny-all network isolation on this Docker daemon");
+        }
+      }
       const info = await container.inspect();
       sandbox = new Sandbox(
         container,
-        {
-          name: normalized.name,
-          image: normalized.image,
-          ports: normalized.ports,
-          timeout: normalized.timeout,
-          persistent: normalized.persistent,
-          createdAt,
-        },
+        metadataFromInspect(normalized.name, info),
         info,
         onResume,
       );
@@ -525,8 +841,7 @@ export class Sandbox {
     } catch (error) {
       await container.remove({ force: true }).catch(() => undefined);
       if (normalized.signal?.aborted) throw error;
-      if (error instanceof DockerUnavailableError) throw error;
-      if (sandbox !== undefined && onCreate !== undefined) throw error;
+      if (error instanceof LocalboxError || sandbox !== undefined) throw error;
       throw new UnsupportedImageError(normalized.image, error);
     }
   }

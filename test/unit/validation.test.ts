@@ -3,14 +3,17 @@ import {
   DockerUnavailableError,
   ImagePullError,
   InvalidSandboxOptionsError,
+  MANAGED_IMAGES,
   PortNotExposedError,
   Sandbox,
   SandboxNotFoundError,
   UnsupportedImageError,
+  UnsupportedSandboxCapabilityError,
 } from "../../src/vercel/index.js";
 import type { SandboxCreateOptions } from "../../src/vercel/types.js";
 import { dockerContainerName } from "../../src/vercel/sandbox.js";
 import { resolveSandboxPath } from "../../src/vercel/filesystem.js";
+import { resolveSandboxImage } from "../../src/vercel/managed-images.js";
 
 describe("sandbox option validation", () => {
   test("rejects invalid create options before contacting Docker", async () => {
@@ -28,6 +31,15 @@ describe("sandbox option validation", () => {
       { ports: Array.from({ length: 16 }, (_, index) => index + 1) },
       { env: { "BAD=KEY": "value" } },
       { env: { LOCALBOX_PRIVATE: "value" } },
+      { resources: { vcpus: 0 } },
+      {
+        tags: Object.fromEntries(Array.from({ length: 6 }, (_, index) => [`tag-${index}`, "value"])),
+      },
+      { region: " " },
+      { region: "iad1", failoverRegions: ["iad1"] },
+      { failoverRegions: ["sfo1", "sfo1"] },
+      { source: { type: "git", url: "https://example.test/repo.git", depth: 0 } },
+      { source: { type: "tarball", url: " " } },
     ];
 
     for (const options of invalidOptions) {
@@ -35,6 +47,38 @@ describe("sandbox option validation", () => {
         InvalidSandboxOptionsError,
       );
     }
+  });
+
+  test("rejects unsupported upstream capabilities before contacting Docker", async () => {
+    const unsupportedOptions = [
+      { source: { type: "snapshot", snapshotId: "snap_123" } },
+      { mounts: { "/data": { drive: "drive_123", mode: "read-write" } } },
+      { snapshotExpiration: 60_000 },
+      { keepLastSnapshots: { count: 2 } },
+      { networkPolicy: { allow: ["example.com"] } },
+      { networkPolicy: "deny-all", ports: [3000] },
+    ];
+
+    for (const options of unsupportedOptions) {
+      await expect(Sandbox.create(options as unknown as SandboxCreateOptions)).rejects.toBeInstanceOf(
+        UnsupportedSandboxCapabilityError,
+      );
+    }
+  });
+
+  test("resolves managed image aliases without rewriting custom OCI images", () => {
+    expect(resolveSandboxImage({})).toBe(MANAGED_IMAGES.universal);
+    expect(resolveSandboxImage({ runtime: "node24" })).toBe(MANAGED_IMAGES.node24);
+    expect(resolveSandboxImage({ image: "vercel/sandbox/node:22" })).toBe(MANAGED_IMAGES.node22);
+    expect(resolveSandboxImage({ image: "vcr.vercel.com/vercel/sandbox/python:3.14" })).toBe(
+      MANAGED_IMAGES.python314,
+    );
+    expect(resolveSandboxImage({ image: "registry.example.test/team/image:v1" })).toBe(
+      "registry.example.test/team/image:v1",
+    );
+    expect(() => resolveSandboxImage({ image: "vercel/sandbox/node:999" })).toThrow(
+      InvalidSandboxOptionsError,
+    );
   });
 
   test("derives stable collision-resistant Docker names", () => {

@@ -13,6 +13,11 @@ import type {
 
 type Assert<T extends true> = T;
 
+type UpstreamCreateOptions = NonNullable<Parameters<typeof VercelSandbox.create>[0]>;
+type LocalCreateOptions = NonNullable<Parameters<typeof LocalSandbox.create>[0]>;
+type WithoutResumeCallback<T> = T extends unknown ? Omit<T, "onResume"> : never;
+type LocalResumeCallback = NonNullable<LocalCreateOptions["onResume"]>;
+
 type FileSystemMethods =
   | "readFile"
   | "writeFile"
@@ -80,4 +85,15 @@ export type CommandFinishedMatchesVercel = Assert<
 >;
 export type SandboxMethodsMatchVercel = Assert<
   LocalSandbox extends CompatibleSandboxMethods ? true : false
+>;
+export type CreateOptionsAcceptVercelParameters = Assert<
+  WithoutResumeCallback<UpstreamCreateOptions> extends WithoutResumeCallback<LocalCreateOptions>
+    ? true
+    : false
+>;
+export type CreateCallbackReceivesLocalSandbox = Assert<
+  Parameters<LocalResumeCallback>[0] extends LocalSandbox ? true : false
+>;
+export type CreateCallbackReturnsPromise = Assert<
+  LocalResumeCallback extends (sandbox: LocalSandbox) => Promise<void> ? true : false
 >;

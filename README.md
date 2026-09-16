@@ -27,7 +27,7 @@ See [ROADMAP.md](ROADMAP.md) for the planned compatibility frontends, isolation 
 pnpm add localbox
 ```
 
-Start Docker before creating a sandbox. The default image is `node:24-bookworm-slim`; Docker downloads it on first use and reuses its local cache afterward.
+Start Docker before creating a sandbox. Localbox pulls its Vercel-compatible universal image from GHCR on first use and reuses Docker's local cache afterward.
 
 ## Usage
 
@@ -51,7 +51,7 @@ try {
 }
 ```
 
-`Sandbox.create()` uses a five-minute timeout, persistent storage, and `/vercel/sandbox` as the working directory by default. Use `runtime: "node24"` for the default image or pass a custom `image` containing `node` and `/bin/sh`.
+`Sandbox.create()` uses a five-minute timeout, persistent storage, and `/vercel/sandbox` as the working directory by default. Vercel managed-image names and the `node22`, `node24`, `node26`, and `python3.13` runtimes resolve to Localbox's mirrored images. Custom OCI image names continue to work when they contain `node`, `/bin/sh`, `git`, and `tar`.
 
 ### Run an HTTP server
 
@@ -90,16 +90,25 @@ See [`examples/basic.mjs`](examples/basic.mjs) for a runnable example covering p
 
 ### Sandbox creation options
 
-| Option | Type | Default | Description |
+| Option | Type | Default | Local behavior |
 | --- | --- | --- | --- |
 | `name` | `string` | Generated UUID | Stable local sandbox name. |
-| `image` | `string` | `node:24-bookworm-slim` | Docker image containing `node` and `/bin/sh`. |
-| `runtime` | `"node24"` | `"node24"` | Selects the default Node.js image. |
-| `ports` | `number[]` | `[]` | TCP ports to expose on `127.0.0.1`. |
+| `image` | `string` | Managed universal image | Resolves Vercel managed-image aliases to the matching GHCR mirror; other OCI image names pass through. |
+| `runtime` | `string` | - | Resolves `node22`, `node24`, `node26`, or `python3.13` to a managed image. Mutually exclusive with `image`. |
+| `source` | Git, tarball, or snapshot source | - | Materializes Git and tarball sources in `/vercel/sandbox`; snapshot sources are rejected. |
+| `ports` | `number[]` | `[]` | Exposes up to 15 TCP ports on `127.0.0.1`. |
 | `timeout` | `number` | `300000` | Sandbox lifetime in milliseconds. |
+| `resources` | `{ vcpus: number }` | Docker default | Applies a CPU quota and 2048 MB memory per vCPU. |
+| `networkPolicy` | `"allow-all"` or `"deny-all"` | `"allow-all"` | Uses Docker bridge networking or disconnects the container after source setup. Custom rule objects are rejected. |
 | `env` | `Record<string, string>` | `{}` | Environment variables added to the container. |
-| `persistent` | `boolean` | `true` | Retain the container filesystem after `stop()`. |
+| `tags` | `Record<string, string>` | `{}` | Persists up to five tags for inspection and list filtering. |
+| `region` | `string` | `"local"` | Persists placement intent as metadata; execution remains local. |
+| `failoverRegions` | `string[]` | `[]` | Persists failover intent as metadata; execution remains local. |
+| `persistent` | `boolean` | `true` | Retains the container filesystem after `stop()`. |
+| `onResume` | `(sandbox) => Promise<void>` | - | Runs after Localbox resumes a stopped container. |
 | `signal` | `AbortSignal` | - | Cancels creation. |
+
+Drive mounts, snapshot sources, and snapshot retention options are accepted by the compatibility types but rejected before Docker is contacted because the local backend cannot implement them faithfully.
 
 ### Sandbox
 
@@ -121,7 +130,7 @@ See [`examples/basic.mjs`](examples/basic.mjs) for a runnable example covering p
 | `sandbox.readFileToBuffer(source)` | Returns a `Buffer`, or `null` when the file does not exist. |
 | `sandbox.downloadFile(source, destination)` | Copies a sandbox file to the host and returns its resolved path. |
 
-A sandbox exposes `name`, `persistent`, `image`, `ports`, `timeout`, `createdAt`, `status`, `expiresAt`, and `fs`.
+A sandbox exposes `name`, `persistent`, `image`, `runtime`, `ports`, `timeout`, `tags`, `region`, `failoverRegions`, `vcpus`, `memory`, `createdAt`, `status`, `expiresAt`, and `fs`.
 
 ### Commands
 
@@ -176,7 +185,7 @@ Compatibility is checked against `@vercel/sandbox@3.3.0`. The versioned [`compat
 pnpm compatibility:vercel
 ```
 
-The complete documented `Command` and `FileSystem` method sets in that manifest are implemented. The supported `Sandbox` subset covers local lifecycle, commands, files, ports, and timeouts. Cloud control-plane features such as snapshots, forks, sessions, users and groups, interactive terminals, resource updates, regions, and network policies are not implemented.
+The complete documented `Command` and `FileSystem` method sets in that manifest are implemented. The supported `Sandbox` subset covers local lifecycle, commands, files, ports, timeouts, create-time resource limits, source materialization, tags, placement metadata, and allow-all or deny-all networking. Cloud control-plane features such as snapshots, forks, sessions, users and groups, interactive terminals, resource updates, drive mounts, and custom network-policy rules are not implemented.
 
 ### Differences from Vercel Sandbox
 
@@ -186,8 +195,10 @@ The complete documented `Command` and `FileSystem` method sets in that manifest 
 | URLs | Exposed ports use loopback URLs; there is no public domain or reverse proxy. |
 | Isolation | Docker containers share the host kernel instead of using microVM isolation. |
 | Persistence | A stopped persistent container retains its writable layer; snapshots are not portable. |
-| User | Commands use the image's default user, which is root in the default image. |
+| User | Commands use the image's default user; managed images run as `ubuntu` with passwordless `sudo`. |
 | Detached commands | Handles and replay buffers exist only in the host Node.js process that created them. |
+| Managed images | Vercel managed-image aliases resolve to images built from the pinned upstream source in [`images/vercel`](images/vercel) and published by the manual [`publish-vercel-images`](.github/workflows/publish-vercel-images.yml) workflow. |
+| Placement | `region` and `failoverRegions` are retained as metadata; Docker execution stays on the local daemon. |
 
 ## Lifecycle and cleanup
 

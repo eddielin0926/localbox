@@ -15,7 +15,7 @@
   "surfaces": {
     "Sandbox": [
       { "name": "Sandbox.list", "availability": "supported", "types": "partial", "behavior": "partial", "notes": "Local pagination and Docker metadata; Vercel credentials and control-plane filters are not applicable." },
-      { "name": "Sandbox.create", "availability": "supported", "types": "partial", "behavior": "partial", "notes": "Supports the documented local subset of creation options." },
+      { "name": "Sandbox.create", "availability": "supported", "types": "compatible", "behavior": "partial", "notes": "Accepts upstream create parameters; local Docker maps resources, sources, tags, placement metadata, callbacks, and allow-all or deny-all networking, and explicitly rejects unsupported cloud capabilities." },
       { "name": "Sandbox.get", "availability": "supported", "types": "partial", "behavior": "partial", "notes": "Named Docker containers replace Vercel sandboxes." },
       { "name": "Sandbox.getOrCreate", "availability": "supported", "types": "partial", "behavior": "partial", "notes": "Creation and resume callbacks are supported for the local lifecycle." },
       { "name": "Sandbox.fork", "availability": "unsupported", "types": "incompatible", "behavior": "incompatible" },

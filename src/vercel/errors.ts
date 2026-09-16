@@ -60,6 +60,24 @@ export class PortNotExposedError extends LocalboxError {
 
 export class InvalidSandboxOptionsError extends LocalboxError {}
 
+export class UnsupportedSandboxCapabilityError extends LocalboxError {
+  readonly capability: string;
+
+  constructor(capability: string) {
+    super(`Localbox's Docker backend does not support ${capability}. Remove that requirement or use a capable backend.`);
+    this.capability = capability;
+  }
+}
+
+export class SandboxSourceError extends LocalboxError {
+  readonly sourceType: "git" | "tarball";
+
+  constructor(sourceType: "git" | "tarball", cause?: unknown) {
+    super(`Could not materialize the ${sourceType} source in the sandbox. Check the source and retry.`, { cause });
+    this.sourceType = sourceType;
+  }
+}
+
 export class ImagePullError extends LocalboxError {
   readonly image: string;
 

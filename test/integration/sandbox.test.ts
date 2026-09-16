@@ -12,8 +12,11 @@ import {
   SandboxNotFoundError,
 } from "../../src/vercel/index.js";
 import { docker } from "../../src/core/docker.js";
+import { dockerContainerName } from "../../src/vercel/sandbox.js";
 
 const ownedNames = new Set<string>();
+const TARBALL_SOURCE =
+  "data:application/gzip;base64,H4sIAAAAAAACA+3NQQqDMBSE4bf2FJ5AniXoeYJNIaAI8QXE05u6KXSvCP7fZobZzCeullNobDU5ixadc0cW/6n6cr/+3Vtte5Va5QJ5MZ/KvTzTMuc0hHryFlL0Y9zCuxIAAAAAAAAAAAAAAAAAwO3t6qbNcwAoAAA=";
 
 function testName(): string {
   const name = `localbox-test-${randomUUID()}`;
@@ -128,6 +131,32 @@ describe("Docker-backed sandbox contracts", () => {
     queueMicrotask(() => controller.abort());
     await expect(abortedWait).rejects.toMatchObject({ name: "AbortError" });
     await expect(abortable.wait()).resolves.toHaveProperty("exitCode");
+  }, 120_000);
+
+  test("materializes sources and preserves local create controls", async () => {
+    const name = testName();
+    const sandbox = await Sandbox.create({
+      name,
+      source: { type: "tarball", url: TARBALL_SOURCE },
+      resources: { vcpus: 1 },
+      networkPolicy: "deny-all",
+      tags: { team: "sdk", purpose: "create-contract" },
+      region: "iad1",
+      failoverRegions: ["sfo1"],
+      timeout: 30_000,
+    });
+
+    expect(await sandbox.fs.readFile("fixture.txt", "utf8")).toBe("source materialized\n");
+    expect(sandbox.tags).toEqual({ team: "sdk", purpose: "create-contract" });
+    expect(sandbox.region).toBe("iad1");
+    expect(sandbox.failoverRegions).toEqual(["sfo1"]);
+    expect(sandbox.vcpus).toBe(1);
+    expect(sandbox.memory).toBe(2_048);
+
+    const info = await docker.getContainer(dockerContainerName(name)).inspect();
+    expect(info.HostConfig.NanoCpus).toBe(1_000_000_000);
+    expect(info.HostConfig.Memory).toBe(2_048 * 1_048_576);
+    expect(Object.keys(info.NetworkSettings.Networks)).toHaveLength(0);
   }, 120_000);
 
   test("supports binary filesystem operations and compatibility helpers", async () => {
