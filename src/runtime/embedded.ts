@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { FilesystemBridge } from "./filesystem-bridge.js";
+import { negotiateSandboxRequirements } from "./capabilities.js";
 import type {
   BackendReference,
   ClientFailure,
@@ -34,9 +35,10 @@ import type {
   ReadFileResult,
   RequestMetadata,
   SandboxBackend,
-  SandboxCapability,
   SandboxClient,
   SandboxErrorDetails,
+  SandboxCapabilities,
+  SandboxRequirementIssue,
   SignalProcessRequest,
   SignalProcessResult,
   StartCommandRequest,
@@ -66,28 +68,23 @@ const ERROR_CATEGORIES: Record<ErrorCategory, true> = {
 
 const ERROR_DETAIL_TYPES: Record<SandboxErrorDetails["type"], true> = {
   "invalid-request": true,
-  "unsupported-requirements": true,
+  "requirement-negotiation": true,
   resource: true,
   backend: true,
   source: true,
   file: true,
   none: true,
 };
-
-const SANDBOX_CAPABILITIES: Record<SandboxCapability, true> = {
-  "command.start": true,
-  "command.detached": true,
-  "endpoint.expose": true,
-  "filesystem.mkdir": true,
-  "filesystem.read": true,
-  "filesystem.write": true,
-  "sandbox.network.allow-all": true,
-  "sandbox.network.deny-all": true,
-  "sandbox.persistence": true,
-  "sandbox.resource-limits": true,
-  "sandbox.source.git": true,
-  "sandbox.source.tarball": true,
+const REQUIREMENT_ISSUE_KINDS: Record<SandboxRequirementIssue["kind"], true> = {
+  malformed: true,
+  unknown: true,
+  duplicate: true,
+  conflict: true,
+  unsupported: true,
+  constraint: true,
+  "invalid-backend-capabilities": true,
 };
+
 
 type BackendOperation =
   | "createSandbox"
@@ -195,18 +192,18 @@ function isErrorDetails(value: unknown): value is SandboxErrorDetails {
         (value.field === null || typeof value.field === "string") &&
         typeof value.reason === "string"
       );
-    case "unsupported-requirements":
+    case "requirement-negotiation":
       return (
-        Array.isArray(value.requirements) &&
-        value.requirements.every(
+        Array.isArray(value.issues) &&
+        value.issues.every(
           (item) =>
             isPlainObject(item) &&
+            (item.index === null || Number.isSafeInteger(item.index)) &&
+            typeof item.kind === "string" &&
+            Object.hasOwn(REQUIREMENT_ISSUE_KINDS, item.kind) &&
             typeof item.reason === "string" &&
-            isPlainObject(item.requirement) &&
-            typeof item.requirement.capability === "string" &&
-            Object.hasOwn(SANDBOX_CAPABILITIES, item.requirement.capability) &&
-            (item.requirement.parameters === null ||
-              isPlainObject(item.requirement.parameters)),
+            (item.backendDiagnostic === null || typeof item.backendDiagnostic === "string") &&
+            (item.requirement === null || isPlainObject(item.requirement)),
         )
       );
     case "resource":
@@ -296,29 +293,30 @@ function backendMismatch(
   };
 }
 
-function unsupportedRequirements(
+function requirementFailure(
   request: CreateSandboxRequest,
   backend: BackendReference,
-  capabilities: ReadonlySet<SandboxCapability>,
-): ClientFailure | null {
-  const requirements = request.requirements
-    .filter((requirement) => !capabilities.has(requirement.capability))
-    .map((requirement) => ({
-      requirement,
-      reason: `Backend ${backend.backendType}/${backend.backendId} does not advertise ${requirement.capability}.`,
-    }));
-  if (requirements.length === 0) return null;
-
+  issues: readonly SandboxRequirementIssue[],
+): ClientFailure {
+  const invalid = issues.some(({ kind }) =>
+    kind === "malformed" ||
+    kind === "unknown" ||
+    kind === "duplicate" ||
+    kind === "conflict" ||
+    kind === "invalid-backend-capabilities"
+  );
   return {
     ok: false,
     error: {
-      category: "unsupported-requirement",
-      code: "LOCALBOX_UNSUPPORTED_REQUIREMENT",
-      message: "The selected backend cannot satisfy all sandbox requirements.",
+      category: invalid ? "invalid-request" : "unsupported-requirement",
+      code: invalid ? "LOCALBOX_INVALID_REQUIREMENT" : "LOCALBOX_UNSUPPORTED_REQUIREMENT",
+      message: invalid
+        ? "Sandbox requirements or backend capabilities are invalid."
+        : "The selected backend cannot satisfy all sandbox requirements.",
       retryable: false,
       requestId: request.requestId,
       backend,
-      details: { type: "unsupported-requirements", requirements },
+      details: { type: "requirement-negotiation", issues },
     },
   };
 }
@@ -694,7 +692,7 @@ function replayMutationResult<Result extends JsonObject>(
 export class EmbeddedSandboxClient implements SandboxClient {
   readonly backend: SandboxBackend;
   readonly backendReference: BackendReference;
-  readonly #capabilities: ReadonlySet<SandboxCapability>;
+  readonly #capabilities: SandboxCapabilities;
   readonly #processes = new Map<string, RuntimeProcess>();
   readonly #mutations = new Map<string, IdempotentMutation>();
   readonly #filesystem: FilesystemBridge;
@@ -708,25 +706,29 @@ export class EmbeddedSandboxClient implements SandboxClient {
       backendId: backend.reference.backendId,
       backendType: backend.reference.backendType,
     });
-    this.#capabilities = new Set(backend.capabilities);
+    this.#capabilities = backend.capabilities;
     this.#filesystem = new FilesystemBridge(backend);
   }
 
   createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
-    return this.#idempotent("createSandbox", request, async () => {
-      const selected = this.backendReference;
-      if (
-        request.backend !== null &&
-        (request.backend.backendId !== selected.backendId ||
-          request.backend.backendType !== selected.backendType)
-      ) {
-        return backendMismatch(request, selected);
-      }
+    const selected = this.backendReference;
+    if (
+      request.backend !== null &&
+      (request.backend.backendId !== selected.backendId ||
+        request.backend.backendType !== selected.backendType)
+    ) {
+      return Promise.resolve(backendMismatch(request, selected));
+    }
 
-      const unsupported = unsupportedRequirements(request, selected, this.#capabilities);
-      if (unsupported !== null) return unsupported;
-      return this.#invoke("createSandbox", request);
-    });
+    const issues = negotiateSandboxRequirements(this.#capabilities, request.requirements);
+    if (issues.length > 0) {
+      return Promise.resolve(requirementFailure(request, selected, issues));
+    }
+    return this.#idempotent(
+      "createSandbox",
+      request,
+      () => this.#invoke("createSandbox", request),
+    );
   }
 
   getSandbox(request: GetSandboxRequest): Promise<ClientResult<GetSandboxResult>> {

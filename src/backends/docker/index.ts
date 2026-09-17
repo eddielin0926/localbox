@@ -34,7 +34,7 @@ import type {
   ListSandboxesResult,
   RequestMetadata,
   SandboxBackend,
-  SandboxCapability,
+  SandboxCapabilities,
   SandboxRecord,
   StartRawCommandRequest,
   StartRawCommandResult,
@@ -53,24 +53,117 @@ const REFERENCE = Object.freeze({
   backendType: "docker",
 }) satisfies BackendReference;
 
-const CAPABILITIES = Object.freeze([
-  "command.start",
-  "command.detached",
-  "endpoint.expose",
-  "filesystem.mkdir",
-  "filesystem.read",
-  "filesystem.write",
-  "sandbox.network.allow-all",
-  "sandbox.network.deny-all",
-  "sandbox.persistence",
-  "sandbox.resource-limits",
-  "sandbox.source.git",
-  "sandbox.source.tarball",
-] satisfies SandboxCapability[]);
-const RAW_COMMAND_CAPABILITIES = Object.freeze([
-  "input",
-  "managed-filesystem-owner",
-] as const);
+const CAPABILITIES = Object.freeze({
+  schemaVersion: 1,
+  operations: {
+    "command.start": {
+      support: "native",
+      constraints: null,
+      diagnostic: "Docker exec starts commands inside the selected container.",
+    },
+    "command.detached": {
+      support: "emulated",
+      constraints: null,
+      diagnostic: "EmbeddedSandboxClient retains detached command state in this Localbox process; it is not recoverable after a process restart.",
+    },
+    "endpoint.expose": {
+      support: "native",
+      constraints: { protocols: ["http"], visibilities: ["loopback"] },
+      diagnostic: "Docker publishes declared TCP ports as HTTP endpoints bound to 127.0.0.1.",
+    },
+    "filesystem.mkdir": {
+      support: "emulated",
+      constraints: null,
+      diagnostic: "Localbox implements directory creation through its managed filesystem command bridge.",
+    },
+    "filesystem.read": {
+      support: "emulated",
+      constraints: null,
+      diagnostic: "Localbox implements bounded file reads through its managed filesystem command bridge.",
+    },
+    "filesystem.write": {
+      support: "emulated",
+      constraints: null,
+      diagnostic: "Localbox implements staged file writes through its managed filesystem command bridge.",
+    },
+    "source.git": {
+      support: "emulated",
+      constraints: null,
+      diagnostic: "Localbox clones Git sources into the workspace after the container starts.",
+    },
+    "source.tarball": {
+      support: "emulated",
+      constraints: null,
+      diagnostic: "Localbox downloads and extracts tarball sources into the workspace after the container starts.",
+    },
+    "raw-command.input": {
+      support: "native",
+      constraints: { maxBytes: FILESYSTEM_TRANSFER_CHUNK_BYTES },
+      diagnostic: `Docker exec accepts bounded stdin chunks up to ${FILESYSTEM_TRANSFER_CHUNK_BYTES} bytes.`,
+    },
+    "raw-command.managed-filesystem-owner": {
+      support: "partial",
+      constraints: { managedImagesOnly: true },
+      diagnostic: "Root ownership changes are restricted to the fixed filesystem bridge in Localbox managed images; custom images cannot request them.",
+    },
+  },
+  isolation: {
+    support: "partial",
+    constraints: {
+      level: "shared-kernel-container",
+      tenancies: ["trusted", "single-tenant"],
+    },
+    diagnostic: "Docker containers share the host kernel and are intended for trusted or single-tenant local development; use a VM-isolated backend for hostile multi-tenant workloads.",
+  },
+  artifacts: {
+    support: "partial",
+    constraints: { kinds: ["runtime", "oci-image", "git", "tarball"] },
+    diagnostic: "Docker accepts managed runtime aliases, OCI images, Git sources, and tarballs; directory, disk-image, and snapshot artifacts are not accepted.",
+  },
+  persistence: {
+    support: "native",
+    constraints: { scopes: ["sandbox-lifecycle", "backend-restart"] },
+    diagnostic: "Persistent Docker containers retain their writable layer across stop/resume and Localbox process restart while Docker daemon data remains; host or daemon storage loss is not covered.",
+  },
+  recovery: {
+    support: "partial",
+    constraints: { scopes: ["sandbox"] },
+    diagnostic: "Sandbox containers can be rediscovered from Docker labels, but in-flight commands, output buffers, waiters, and idempotency records cannot be recovered.",
+  },
+  networking: {
+    support: "partial",
+    constraints: {
+      modes: ["allow-all", "deny-all"],
+      portExposure: ["loopback"],
+      customPolicies: false,
+    },
+    diagnostic: "Docker supports bridge networking or network-none isolation and loopback-only published ports; custom policies and non-loopback exposure are unsupported, and deny-all Git/tarball sources are disconnected only after materialization.",
+  },
+  resources: {
+    support: "partial",
+    constraints: {
+      cpu: { minimumVcpus: 1, maximumVcpus: null, stepVcpus: 1 },
+      memory: {
+        minimumBytes: 2_147_483_648,
+        maximumBytes: null,
+        stepBytes: 2_147_483_648,
+      },
+      memoryBytesPerVcpu: 2_147_483_648,
+      enforcement: "hard",
+    },
+    diagnostic: "Docker enforces integer NanoCPU quotas and a fixed 2 GiB memory limit per requested vCPU; independent memory limits and host-capacity guarantees are unavailable.",
+  },
+  terminals: {
+    support: "unsupported",
+    constraints: { modes: [] },
+    diagnostic: "The Docker backend exposes non-interactive exec only; choose a backend with PTY support for interactive terminals.",
+  },
+  snapshots: {
+    support: "unsupported",
+    constraints: { operations: [] },
+    diagnostic: "The Docker backend cannot create, restore, or clone snapshots; use an OCI image or source artifact instead.",
+  },
+}) satisfies SandboxCapabilities;
 
 
 interface DeadlineScope {
@@ -385,7 +478,6 @@ function listRecord(item: SandboxListItem): SandboxRecord {
 export class DockerBackend implements SandboxBackend {
   readonly reference = REFERENCE;
   readonly capabilities = CAPABILITIES;
-  readonly rawCommandCapabilities = RAW_COMMAND_CAPABILITIES;
   readonly #docker: Dockerode;
 
   constructor() {

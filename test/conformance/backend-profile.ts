@@ -1,30 +1,39 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, test } from "vitest";
+import {
+  negotiateSandboxRequirements,
+  SANDBOX_OPERATIONAL_CAPABILITIES,
+} from "../../src/runtime/index.js";
 import type {
   ClientResult,
   CreateSandboxRequest,
   JsonObject,
   ReadCommandOutputResult,
-  SandboxCapability,
+  SandboxCapabilities,
   SandboxClient,
+  SandboxOperationalCapability,
+  SandboxRequirement,
   SandboxSource,
   SandboxSpec,
 } from "../../src/runtime/index.js";
 
+const ACCEPT_SUPPORTED = ["native", "emulated", "partial"] as const;
+const DOMAIN_CAPABILITIES = [
+  "isolation",
+  "artifacts",
+  "persistence",
+  "recovery",
+  "networking",
+  "resources",
+  "terminals",
+  "snapshots",
+] as const;
+type DomainCapability = typeof DOMAIN_CAPABILITIES[number];
+type CapabilityCoverageKey = SandboxOperationalCapability | DomainCapability;
 const ALL_CAPABILITIES = [
-  "command.start",
-  "command.detached",
-  "endpoint.expose",
-  "filesystem.mkdir",
-  "filesystem.read",
-  "filesystem.write",
-  "sandbox.network.allow-all",
-  "sandbox.network.deny-all",
-  "sandbox.persistence",
-  "sandbox.resource-limits",
-  "sandbox.source.git",
-  "sandbox.source.tarball",
-] as const satisfies readonly SandboxCapability[];
+  ...SANDBOX_OPERATIONAL_CAPABILITIES,
+  ...DOMAIN_CAPABILITIES,
+] as const satisfies readonly CapabilityCoverageKey[];
 
 export const BACKEND_CONFORMANCE_COVERAGE = {
   "command.start": ["command execution", "command cleanup"],
@@ -33,13 +42,36 @@ export const BACKEND_CONFORMANCE_COVERAGE = {
   "filesystem.mkdir": ["filesystem directories"],
   "filesystem.read": ["filesystem pages", "filesystem errors"],
   "filesystem.write": ["filesystem writes", "filesystem cancellation"],
-  "sandbox.network.allow-all": ["allow-all networking"],
-  "sandbox.network.deny-all": ["deny-all networking"],
-  "sandbox.persistence": ["persistent lifecycle"],
-  "sandbox.resource-limits": ["resource limits"],
-  "sandbox.source.git": ["git source materialization"],
-  "sandbox.source.tarball": ["tarball source materialization"],
-} as const satisfies Record<SandboxCapability, readonly string[]>;
+  "source.git": ["git source materialization"],
+  "source.tarball": ["tarball source materialization"],
+  "raw-command.input": ["filesystem writes", "filesystem cancellation"],
+  "raw-command.managed-filesystem-owner": ["filesystem ownership"],
+  isolation: ["command execution security boundary"],
+  artifacts: ["git source materialization", "tarball source materialization"],
+  persistence: ["persistent lifecycle"],
+  recovery: ["persistent lifecycle", "command cleanup"],
+  networking: ["allow-all networking", "deny-all networking"],
+  resources: ["resource limits"],
+  terminals: ["command execution"],
+  snapshots: ["capability rejection"],
+} as const satisfies Record<CapabilityCoverageKey, readonly string[]>;
+
+function operationRequirement(operation: SandboxOperationalCapability): SandboxRequirement {
+  return { type: "operation", operation, acceptableSupport: ACCEPT_SUPPORTED };
+}
+
+const PERSISTENCE_REQUIREMENT = {
+  type: "persistence",
+  scope: "sandbox-lifecycle",
+  acceptableSupport: ACCEPT_SUPPORTED,
+} as const satisfies SandboxRequirement;
+const RESOURCE_REQUIREMENT = {
+  type: "resources",
+  vcpus: 1,
+  memoryBytes: 2_147_483_648,
+  enforcement: "hard",
+  acceptableSupport: ACCEPT_SUPPORTED,
+} as const satisfies SandboxRequirement;
 
 export type SandboxSpecOverrides = Partial<Pick<
   SandboxSpec,
@@ -58,7 +90,7 @@ export type SandboxSpecOverrides = Partial<Pick<
 
 export interface BackendConformanceHarness {
   readonly name: string;
-  readonly capabilities: readonly string[];
+  readonly capabilities: SandboxCapabilities;
   readonly sourceFixtures?: Readonly<Partial<Record<"git" | "tarball", SandboxSource>>>;
   createClient(): SandboxClient | Promise<SandboxClient>;
   sandboxSpec(name: string, overrides?: SandboxSpecOverrides): SandboxSpec;
@@ -100,7 +132,7 @@ function unwrap<T extends JsonObject>(result: ClientResult<T>): T {
 function createRequest(
   harness: BackendConformanceHarness,
   name: string,
-  requirements: readonly SandboxCapability[] = [],
+  requirements: readonly SandboxRequirement[] = [],
   overrides: SandboxSpecOverrides = {},
   idempotencyKey = requestId(`key:create:${name}`),
 ): CreateSandboxRequest {
@@ -108,31 +140,37 @@ function createRequest(
     ...mutationMetadata(`create:${name}`, idempotencyKey),
     sandboxId: name,
     backend: null,
-    requirements: requirements.map((capability) => ({ capability, parameters: null })),
+    requirements,
     spec: harness.sandboxSpec(name, overrides),
   };
 }
 
 function hasCapabilities(
   harness: BackendConformanceHarness,
-  capabilities: readonly SandboxCapability[],
+  requirements: readonly SandboxRequirement[],
 ): boolean {
-  const advertised = new Set(harness.capabilities);
-  return capabilities.every((capability) => advertised.has(capability));
+  return negotiateSandboxRequirements(harness.capabilities, requirements).length === 0;
 }
 
 function profileTest(
   harness: BackendConformanceHarness,
-  capabilities: readonly SandboxCapability[],
+  requirements: readonly SandboxRequirement[],
   title: string,
   run: (context: ProfileContext) => Promise<void>,
 ): void {
-  const advertised = new Set(harness.capabilities);
-  const absent = capabilities.filter((capability) => !advertised.has(capability));
-  const suffix = absent.length === 0
-    ? capabilities.length === 0 ? "" : ` [capabilities: ${capabilities.join(", ")}]`
-    : ` [absent capability: ${absent.join(", ")}]`;
-  test.skipIf(absent.length > 0)(`${title}${suffix}`, async () => {
+  const unsupported = requirements.filter((requirement) => {
+    const capability = requirement.type === "operation"
+      ? harness.capabilities.operations[requirement.operation]
+      : harness.capabilities[requirement.type];
+    return capability.support === "unsupported";
+  });
+  const labels = requirements.map((requirement) =>
+    requirement.type === "operation" ? requirement.operation : requirement.type
+  );
+  const suffix = unsupported.length === 0
+    ? labels.length === 0 ? "" : ` [capabilities: ${labels.join(", ")}]`
+    : ` [unsupported capability: ${labels.filter((_, index) => unsupported.includes(requirements[index]!)).join(", ")}]`;
+  test.skipIf(unsupported.length > 0)(`${title}${suffix}`, async () => {
     const context: ProfileContext = {
       client: await harness.createClient(),
       sandboxIds: new Set<string>(),
@@ -153,13 +191,13 @@ async function createSandbox(
   harness: BackendConformanceHarness,
   context: ProfileContext,
   profile: string,
-  capabilities: readonly SandboxCapability[] = [],
+  requirements: readonly SandboxRequirement[] = [],
   overrides: SandboxSpecOverrides = {},
 ): Promise<string> {
   const sandboxId = harness.uniqueSandboxName(profile);
   context.sandboxIds.add(sandboxId);
   unwrap(await context.client.createSandbox(
-    createRequest(harness, sandboxId, capabilities, overrides),
+    createRequest(harness, sandboxId, requirements, overrides),
   ));
   return sandboxId;
 }
@@ -214,14 +252,46 @@ async function waitForStatus(
   throw new Error(`Sandbox ${sandboxId} did not reach ${expected} within ${timeoutMs}ms.`);
 }
 
-export function backendCapabilityCoverage(capabilities: readonly string[]): Readonly<{
-  covered: readonly SandboxCapability[];
+export function backendCapabilityCoverage(capabilities: SandboxCapabilities): Readonly<{
+  covered: readonly CapabilityCoverageKey[];
   unknown: readonly string[];
+  missing: readonly string[];
+  invalid: readonly string[];
 }> {
-  const known = new Set<string>(ALL_CAPABILITIES);
-  const unknown = [...new Set(capabilities.filter((capability) => !known.has(capability)))];
-  const covered = ALL_CAPABILITIES.filter((capability) => capabilities.includes(capability));
-  return { covered, unknown };
+  const record = capabilities as unknown as Record<string, unknown>;
+  const knownTop = ["schemaVersion", "operations", ...DOMAIN_CAPABILITIES];
+  const unknown = Object.keys(record)
+    .filter((key) => !knownTop.includes(key))
+    .map((key) => `capabilities.${key}`);
+  const missing = knownTop
+    .filter((key) => !Object.hasOwn(record, key))
+    .map((key) => `capabilities.${key}`);
+  const operations = record.operations !== null && typeof record.operations === "object" &&
+      !Array.isArray(record.operations)
+    ? record.operations as Record<string, unknown>
+    : {};
+  unknown.push(
+    ...Object.keys(operations)
+      .filter((key) => !SANDBOX_OPERATIONAL_CAPABILITIES.includes(key as SandboxOperationalCapability))
+      .map((key) => `operations.${key}`),
+  );
+  missing.push(
+    ...SANDBOX_OPERATIONAL_CAPABILITIES
+      .filter((key) => !Object.hasOwn(operations, key))
+      .map((key) => `operations.${key}`),
+  );
+  const covered = ALL_CAPABILITIES.filter((key) =>
+    key in operations || Object.hasOwn(record, key)
+  );
+  const invalid = negotiateSandboxRequirements(capabilities, [])
+    .filter(({ kind }) => kind === "invalid-backend-capabilities")
+    .map(({ reason }) => reason);
+  return {
+    covered,
+    unknown: unknown.sort(),
+    missing,
+    invalid,
+  };
 }
 
 export function registerBackendConformanceProfiles(harness: BackendConformanceHarness): void {
@@ -229,7 +299,9 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
     test("advertises only capabilities with behavior profile coverage", () => {
       const report = backendCapabilityCoverage(harness.capabilities);
       expect(report.unknown).toEqual([]);
-      expect(report.covered).toEqual([...new Set(harness.capabilities)]);
+      expect(report.missing).toEqual([]);
+      expect(report.invalid).toEqual([]);
+      expect(report.covered).toEqual(ALL_CAPABILITIES);
       for (const capability of report.covered) {
         expect(BACKEND_CONFORMANCE_COVERAGE[capability].length).toBeGreaterThan(0);
       }
@@ -302,15 +374,15 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       expect(missing).toMatchObject({ ok: false, error: { category: "not-found" } });
     });
 
-    profileTest(harness, ["sandbox.persistence"], "persistent stop and resume preserve state and are idempotent", async (context) => {
+    profileTest(harness, [PERSISTENCE_REQUIREMENT], "persistent stop and resume preserve state and are idempotent", async (context) => {
       const sandboxId = await createSandbox(
         harness,
         context,
         "persistence",
-        ["sandbox.persistence"],
+        [PERSISTENCE_REQUIREMENT],
         { persistent: true },
       );
-      if (hasCapabilities(harness, ["filesystem.write", "filesystem.read"])) {
+      if (hasCapabilities(harness, [operationRequirement("filesystem.write"), operationRequirement("filesystem.read")])) {
         unwrap(await context.client.writeFile({
           ...mutationMetadata(`persistent-write:${sandboxId}`),
           sandboxId,
@@ -348,7 +420,7 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       expect(resumed.status).toBe("running");
       expect(resumeRetry.status).toBe("running");
 
-      if (hasCapabilities(harness, ["filesystem.write", "filesystem.read"])) {
+      if (hasCapabilities(harness, [operationRequirement("filesystem.write"), operationRequirement("filesystem.read")])) {
         const state = unwrap(await context.client.readFile({
           ...requestMetadata(`persistent-read:${sandboxId}`),
           sandboxId,
@@ -361,8 +433,8 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       }
     });
 
-    profileTest(harness, ["command.start"], "commands preserve output order, pagination, exit status, errors, and start idempotency", async (context) => {
-      const sandboxId = await createSandbox(harness, context, "commands", ["command.start"]);
+    profileTest(harness, [operationRequirement("command.start")], "commands preserve output order, pagination, exit status, errors, and start idempotency", async (context) => {
+      const sandboxId = await createSandbox(harness, context, "commands", [operationRequirement("command.start")]);
       const startMetadata = mutationMetadata(`start:${sandboxId}`);
       const request = {
         ...startMetadata,
@@ -411,12 +483,12 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       expect((await readAllOutput(context.client, sandboxId, missing.processId, 4096)).text).toContain("ENOENT");
     });
 
-    profileTest(harness, ["command.start", "command.detached"], "detached commands follow output and accept idempotent signals", async (context) => {
+    profileTest(harness, [operationRequirement("command.start"), operationRequirement("command.detached")], "detached commands follow output and accept idempotent signals", async (context) => {
       const sandboxId = await createSandbox(
         harness,
         context,
         "signals",
-        ["command.start", "command.detached"],
+        [operationRequirement("command.start"), operationRequirement("command.detached")],
       );
       const process = unwrap(await context.client.startCommand({
         ...mutationMetadata(`start-signal:${sandboxId}`),
@@ -462,12 +534,12 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       expect(result.result.exitCode).not.toBe(0);
     });
 
-    profileTest(harness, ["filesystem.mkdir", "filesystem.write", "filesystem.read"], "filesystem supports recursive directories, binary and text pages, idempotent writes, and stable errors", async (context) => {
+    profileTest(harness, [operationRequirement("filesystem.mkdir"), operationRequirement("filesystem.write"), operationRequirement("filesystem.read")], "filesystem supports recursive directories, binary and text pages, idempotent writes, and stable errors", async (context) => {
       const sandboxId = await createSandbox(
         harness,
         context,
         "filesystem",
-        ["filesystem.mkdir", "filesystem.write", "filesystem.read"],
+        [operationRequirement("filesystem.mkdir"), operationRequirement("filesystem.write"), operationRequirement("filesystem.read")],
       );
       const mkdirMetadata = mutationMetadata(`mkdir:${sandboxId}`);
       const directory = unwrap(await context.client.makeDirectory({
@@ -554,12 +626,12 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       });
     });
 
-    profileTest(harness, ["filesystem.write", "filesystem.read"], "expired filesystem writes abort before changing the target", async (context) => {
+    profileTest(harness, [operationRequirement("filesystem.write"), operationRequirement("filesystem.read")], "expired filesystem writes abort before changing the target", async (context) => {
       const sandboxId = await createSandbox(
         harness,
         context,
         "filesystem-deadline",
-        ["filesystem.write", "filesystem.read"],
+        [operationRequirement("filesystem.write"), operationRequirement("filesystem.read")],
       );
       const path = "/vercel/sandbox/unchanged.txt";
       unwrap(await context.client.writeFile({
@@ -588,12 +660,12 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       })).content).toEqual({ encoding: "utf8", data: "before" });
     });
 
-    profileTest(harness, ["endpoint.expose"], "endpoint records resolve declared ports and reject unavailable ports", async (context) => {
+    profileTest(harness, [operationRequirement("endpoint.expose")], "endpoint records resolve declared ports and reject unavailable ports", async (context) => {
       const sandboxId = await createSandbox(
         harness,
         context,
         "endpoint",
-        ["endpoint.expose"],
+        [operationRequirement("endpoint.expose")],
         { ports: [3000] },
       );
       const sandbox = unwrap(await context.client.getSandbox({
@@ -637,13 +709,13 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       expect(result).toMatchObject({ ok: false, error: { category: "deadline-exceeded" } });
     });
 
-    profileTest(harness, ["sandbox.persistence"], "sandbox deadlines extend idempotently and expire", async (context) => {
+    profileTest(harness, [PERSISTENCE_REQUIREMENT], "sandbox deadlines extend idempotently and expire", async (context) => {
       const sandboxId = harness.uniqueSandboxName("deadline");
       context.sandboxIds.add(sandboxId);
       const initial = unwrap(await context.client.createSandbox(createRequest(
         harness,
         sandboxId,
-        ["sandbox.persistence"],
+        [PERSISTENCE_REQUIREMENT],
         {
           persistent: true,
           timeoutMs: 3_000,
@@ -667,12 +739,12 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       await waitForStatus(context.client, sandboxId, "stopped", 10_000);
     });
 
-    profileTest(harness, ["sandbox.resource-limits"], "resource limits are visible in sandbox records", async (context) => {
+    profileTest(harness, [RESOURCE_REQUIREMENT], "resource limits are visible in sandbox records", async (context) => {
       const sandboxId = await createSandbox(
         harness,
         context,
         "resources",
-        ["sandbox.resource-limits"],
+        [RESOURCE_REQUIREMENT],
         { resources: { vcpus: 1, memoryBytes: 2_147_483_648 } },
       );
       const record = unwrap(await context.client.getSandbox({
@@ -684,13 +756,19 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
     });
 
     for (const policy of ["allow-all", "deny-all"] as const) {
-      const networkCapability = `sandbox.network.${policy}` as const;
-      profileTest(harness, [networkCapability, "command.start"], `${policy} networking matches the declared isolation policy`, async (context) => {
+      const networkRequirement = {
+        type: "networking",
+        mode: policy,
+        portExposure: null,
+        customPolicy: false,
+        acceptableSupport: ACCEPT_SUPPORTED,
+      } as const satisfies SandboxRequirement;
+      profileTest(harness, [networkRequirement, operationRequirement("command.start")], `${policy} networking matches the declared isolation policy`, async (context) => {
         const sandboxId = await createSandbox(
           harness,
           context,
           `network-${policy}`,
-          [networkCapability, "command.start"],
+          [networkRequirement, operationRequirement("command.start")],
           { networkPolicy: policy },
         );
         const process = unwrap(await context.client.startCommand({
@@ -719,8 +797,17 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
     }
 
     for (const sourceType of ["git", "tarball"] as const) {
-      const sourceCapability = `sandbox.source.${sourceType}` as const;
-      profileTest(harness, [sourceCapability, "filesystem.read"], `${sourceType} sources materialize into the workspace`, async (context) => {
+      const sourceCapability = `source.${sourceType}` as const;
+      const sourceRequirements = [
+        operationRequirement(sourceCapability),
+        operationRequirement("filesystem.read"),
+        {
+          type: "artifacts",
+          kinds: [sourceType],
+          acceptableSupport: ACCEPT_SUPPORTED,
+        } as const satisfies SandboxRequirement,
+      ];
+      profileTest(harness, sourceRequirements, `${sourceType} sources materialize into the workspace`, async (context) => {
         const source = harness.sourceFixtures?.[sourceType];
         if (source === undefined) {
           throw new Error(`${harness.name} advertises ${sourceCapability} without a conformance source fixture.`);
@@ -729,7 +816,7 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
           harness,
           context,
           `source-${sourceType}`,
-          [sourceCapability, "filesystem.read"],
+          sourceRequirements,
           { source },
         );
         const result = await context.client.readFile({
@@ -745,12 +832,12 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       });
     }
 
-    profileTest(harness, ["command.start", "command.detached", "endpoint.expose"], "deletion cleans commands, endpoints, and sandbox resources", async (context) => {
+    profileTest(harness, [operationRequirement("command.start"), operationRequirement("command.detached"), operationRequirement("endpoint.expose")], "deletion cleans commands, endpoints, and sandbox resources", async (context) => {
       const sandboxId = await createSandbox(
         harness,
         context,
         "cleanup",
-        ["command.start", "command.detached", "endpoint.expose"],
+        [operationRequirement("command.start"), operationRequirement("command.detached"), operationRequirement("endpoint.expose")],
         { ports: [3000] },
       );
       const process = unwrap(await context.client.startCommand({

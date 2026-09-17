@@ -6,24 +6,14 @@ import type {
   CreateSandboxRequest,
   RequestMetadata,
   SandboxBackend,
-  SandboxCapability,
+  SandboxCapabilities,
   SandboxRecord,
 } from "../../src/runtime/index.js";
+import {
+  TEST_CAPABILITIES,
+  testCapabilitiesWithOperationSupport,
+} from "../fixtures/runtime-capabilities.js";
 
-const ALL_CAPABILITIES = [
-  "command.start",
-  "command.detached",
-  "endpoint.expose",
-  "filesystem.mkdir",
-  "filesystem.read",
-  "filesystem.write",
-  "sandbox.network.allow-all",
-  "sandbox.network.deny-all",
-  "sandbox.persistence",
-  "sandbox.resource-limits",
-  "sandbox.source.git",
-  "sandbox.source.tarball",
-] as const satisfies readonly SandboxCapability[];
 
 function unavailable(
   request: RequestMetadata,
@@ -45,13 +35,12 @@ function unavailable(
 
 function createBackend(
   reference: BackendReference,
-  capabilities: readonly SandboxCapability[] = ALL_CAPABILITIES,
-  overrides: Partial<Omit<SandboxBackend, "reference" | "capabilities" | "rawCommandCapabilities">> = {},
+  capabilities: SandboxCapabilities = TEST_CAPABILITIES,
+  overrides: Partial<Omit<SandboxBackend, "reference" | "capabilities">> = {},
 ): SandboxBackend {
   return {
     reference,
     capabilities,
-    rawCommandCapabilities: ["input", "managed-filesystem-owner"],
     createSandbox: (request) => unavailable(request, "createSandbox"),
     getSandbox: (request) => unavailable(request, "getSandbox"),
     listSandboxes: (request) => unavailable(request, "listSandboxes"),
@@ -125,7 +114,7 @@ function sandboxRecord(
 
 function createMemoryBackend(reference: BackendReference): SandboxBackend {
   const sandboxes = new Map<string, SandboxRecord>();
-  return createBackend(reference, ALL_CAPABILITIES, {
+  return createBackend(reference, TEST_CAPABILITIES, {
     async createSandbox(request) {
       if (sandboxes.has(request.sandboxId)) {
         return {
@@ -208,11 +197,27 @@ describe("EmbeddedSandboxClient", () => {
   test("rejects backend mismatches and unsupported requirements before creation", async () => {
     const reference = { backendId: "selected", backendType: "test" } as const;
     let createCalls = 0;
+    let rawCommandCalls = 0;
+    const operationCapabilities = testCapabilitiesWithOperationSupport({
+      "filesystem.write": "unsupported",
+    });
+    const capabilities: SandboxCapabilities = {
+      ...operationCapabilities,
+      persistence: {
+        support: "unsupported",
+        constraints: { scopes: [] },
+        diagnostic: "This test backend cannot preserve stopped sandboxes.",
+      },
+    };
     const client = new EmbeddedSandboxClient(
-      createBackend(reference, ["command.start"], {
+      createBackend(reference, capabilities, {
         async createSandbox(request) {
           createCalls += 1;
           return { ok: true, value: { sandbox: sandboxRecord(request, reference) } };
+        },
+        async startRawCommand(request) {
+          rawCommandCalls += 1;
+          return unavailable(request, "startRawCommand");
         },
       }),
     );
@@ -242,8 +247,16 @@ describe("EmbeddedSandboxClient", () => {
 
     const unsupported = await client.createSandbox(
       createRequest("unsupported", "sandbox-unsupported", "unsupported", null, [
-        { capability: "filesystem.write", parameters: null },
-        { capability: "sandbox.persistence", parameters: { durable: true } },
+        {
+          type: "operation",
+          operation: "filesystem.write",
+          acceptableSupport: ["native", "emulated", "partial"],
+        },
+        {
+          type: "persistence",
+          scope: "sandbox-lifecycle",
+          acceptableSupport: ["native", "emulated", "partial"],
+        },
       ]),
     );
     expect(unsupported).toMatchObject({
@@ -255,14 +268,71 @@ describe("EmbeddedSandboxClient", () => {
         requestId: "unsupported",
         backend: reference,
         details: {
-          type: "unsupported-requirements",
-          requirements: [
-            { requirement: { capability: "filesystem.write" } },
-            { requirement: { capability: "sandbox.persistence" } },
+          type: "requirement-negotiation",
+          issues: [
+            {
+              kind: "unsupported",
+              requirement: { type: "operation", operation: "filesystem.write" },
+              backendDiagnostic: "Test backend writes files.",
+            },
+            {
+              kind: "unsupported",
+              requirement: { type: "persistence", scope: "sandbox-lifecycle" },
+              backendDiagnostic: "This test backend cannot preserve stopped sandboxes.",
+            },
           ],
         },
       },
     });
+    const retried = await client.createSandbox({
+      ...createRequest("unsupported-retry", "sandbox-unsupported", "unsupported", null, [
+        {
+          type: "operation",
+          operation: "filesystem.write",
+          acceptableSupport: ["native", "emulated", "partial"],
+        },
+        {
+          type: "persistence",
+          scope: "sandbox-lifecycle",
+          acceptableSupport: ["native", "emulated", "partial"],
+        },
+      ]),
+      idempotencyKey: "create:sandbox-unsupported",
+    });
+    expect(retried).toMatchObject({
+      ok: false,
+      error: {
+        requestId: "unsupported-retry",
+        details: { type: "requirement-negotiation", issues: unsupported.ok ? [] : unsupported.error.details.type === "requirement-negotiation" ? unsupported.error.details.issues : [] },
+      },
+    });
+    expect(rawCommandCalls).toBe(0);
+    const malformed = await client.createSandbox(
+      createRequest(
+        "malformed",
+        "sandbox-malformed",
+        "malformed",
+        null,
+        [
+          {
+            type: "future-requirement",
+            acceptableSupport: ["native"],
+          },
+        ] as unknown as CreateSandboxRequest["requirements"],
+      ),
+    );
+    expect(malformed).toMatchObject({
+      ok: false,
+      error: {
+        category: "invalid-request",
+        code: "LOCALBOX_INVALID_REQUIREMENT",
+        details: {
+          type: "requirement-negotiation",
+          issues: [{ index: 0, kind: "unknown" }],
+        },
+      },
+    });
+    expect(rawCommandCalls).toBe(0);
     expect(createCalls).toBe(0);
   });
 

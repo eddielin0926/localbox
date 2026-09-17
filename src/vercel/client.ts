@@ -94,7 +94,16 @@ function translatedClientError(error: SandboxError): Error {
       const capability = /does not support (.+)\. Remove/.exec(error.message)?.[1] ?? error.message;
       return new UnsupportedSandboxCapabilityError(capability);
     }
+    case "LOCALBOX_UNSUPPORTED_REQUIREMENT": {
+      const first = error.details.type === "requirement-negotiation"
+        ? error.details.issues[0]
+        : undefined;
+      return new UnsupportedSandboxCapabilityError(
+        first?.backendDiagnostic ?? first?.reason ?? error.message,
+      );
+    }
     case "LOCALBOX_INVALID_REQUEST":
+    case "LOCALBOX_INVALID_REQUIREMENT":
       return new InvalidSandboxOptionsError(error.message);
     case "LOCALBOX_OPERATION_CANCELLED":
     case "LOCALBOX_DEADLINE_EXCEEDED":

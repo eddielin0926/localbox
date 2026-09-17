@@ -46,6 +46,7 @@ import type {
 const DEFAULT_TIMEOUT = 300_000;
 const WORKSPACE = "/vercel/sandbox";
 const DEFAULT_IMAGE = "vcr.vercel.com/vercel/sandbox/universal";
+const SUPPORTED_IMPLEMENTATIONS = ["native", "emulated", "partial"] as const;
 
 interface SignalOptions {
   signal?: AbortSignal;
@@ -131,14 +132,42 @@ function normalizeCreateOptions(options: SandboxCreateOptions = {}): FrontendCre
     throw new UnsupportedSandboxCapabilityError("simultaneous deny-all networking and exposed ports");
   }
   const vcpus = options.resources?.vcpus ?? null;
+  const artifactKinds = [
+    options.runtime !== undefined ? "runtime" : "oci-image",
+    ...(source === null ? [] : [source.type]),
+  ] as const;
   const requirements: SandboxRequirement[] = [
-    { capability: `sandbox.network.${networkPolicy}`, parameters: null },
-    ...(persistent ? [{ capability: "sandbox.persistence" as const, parameters: null }] : []),
-    ...(vcpus === null ? [] : [{ capability: "sandbox.resource-limits" as const, parameters: null }]),
-    ...(ports.length === 0 ? [] : [{ capability: "endpoint.expose" as const, parameters: null }]),
+    { type: "operation", operation: "command.start", acceptableSupport: SUPPORTED_IMPLEMENTATIONS },
+    { type: "operation", operation: "command.detached", acceptableSupport: SUPPORTED_IMPLEMENTATIONS },
+    { type: "operation", operation: "filesystem.mkdir", acceptableSupport: SUPPORTED_IMPLEMENTATIONS },
+    { type: "operation", operation: "filesystem.read", acceptableSupport: SUPPORTED_IMPLEMENTATIONS },
+    { type: "operation", operation: "filesystem.write", acceptableSupport: SUPPORTED_IMPLEMENTATIONS },
+    ...(ports.length === 0
+      ? []
+      : [{ type: "operation" as const, operation: "endpoint.expose" as const, acceptableSupport: SUPPORTED_IMPLEMENTATIONS }]),
     ...(source === null
       ? []
-      : [{ capability: `sandbox.source.${source.type}` as const, parameters: null }]),
+      : [{ type: "operation" as const, operation: `source.${source.type}` as const, acceptableSupport: SUPPORTED_IMPLEMENTATIONS }]),
+    { type: "artifacts", kinds: artifactKinds, acceptableSupport: SUPPORTED_IMPLEMENTATIONS },
+    ...(persistent
+      ? [{ type: "persistence" as const, scope: "sandbox-lifecycle" as const, acceptableSupport: SUPPORTED_IMPLEMENTATIONS }]
+      : []),
+    {
+      type: "networking",
+      mode: networkPolicy,
+      portExposure: ports.length === 0 ? null : "loopback",
+      customPolicy: false,
+      acceptableSupport: SUPPORTED_IMPLEMENTATIONS,
+    },
+    ...(vcpus === null
+      ? []
+      : [{
+          type: "resources" as const,
+          vcpus,
+          memoryBytes: vcpus * 2_048 * 1_048_576,
+          enforcement: "hard" as const,
+          acceptableSupport: SUPPORTED_IMPLEMENTATIONS,
+        }]),
   ];
 
   return {

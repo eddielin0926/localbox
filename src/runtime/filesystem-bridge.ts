@@ -8,7 +8,6 @@ import type {
   JsonValue,
   MakeDirectoryRequest,
   MakeDirectoryResult,
-  RawCommandCapability,
   RawCommandEvent,
   ReadFileRequest,
   ReadFileResult,
@@ -204,7 +203,7 @@ function invalid(request: RequestMetadata, backend: SandboxBackend, field: strin
 function unsupported(
   request: RequestMetadata,
   backend: SandboxBackend,
-  capability: RawCommandCapability | "filesystem.mkdir" | "filesystem.read" | "filesystem.write",
+  capability: "filesystem.mkdir" | "filesystem.read" | "filesystem.write" | "raw-command.input" | "raw-command.managed-filesystem-owner",
 ): ClientFailure {
   return failure(
     request,
@@ -369,13 +368,9 @@ function operationArguments(request: RunFilesystemOperationRequest): JsonObject 
 
 export class FilesystemBridge {
   readonly #backend: SandboxBackend;
-  readonly #capabilities: ReadonlySet<string>;
-  readonly #rawCapabilities: ReadonlySet<RawCommandCapability>;
 
   constructor(backend: SandboxBackend) {
-    this.#capabilities = new Set(backend.capabilities);
     this.#backend = backend;
-    this.#rawCapabilities = new Set(backend.rawCommandCapabilities);
   }
 
   async readFile(request: ReadFileRequest, signal?: AbortSignal): Promise<ClientResult<ReadFileResult>> {
@@ -389,7 +384,7 @@ export class FilesystemBridge {
       if (request.encoding !== "base64" && request.encoding !== "utf8") {
         throw new TypeError("encoding must be base64 or utf8.");
       }
-      if (!this.#capabilities.has("filesystem.read")) {
+      if (this.#backend.capabilities.operations["filesystem.read"].support === "unsupported") {
         return unsupported(request, this.#backend, "filesystem.read");
       }
       const result = await this.#command(request, "readFile", {
@@ -415,7 +410,7 @@ export class FilesystemBridge {
     try {
       assertPath(request.path, "path");
       assertMode(request.mode, "mode");
-      if (!this.#capabilities.has("filesystem.write")) {
+      if (this.#backend.capabilities.operations["filesystem.write"].support === "unsupported") {
         return unsupported(request, this.#backend, "filesystem.write");
       }
       const contents = contentBuffer(request.content);
@@ -434,7 +429,7 @@ export class FilesystemBridge {
       assertPath(request.path, "path");
       assertBoolean(request.recursive, "recursive");
       assertMode(request.mode, "mode");
-      if (!this.#capabilities.has("filesystem.mkdir")) {
+      if (this.#backend.capabilities.operations["filesystem.mkdir"].support === "unsupported") {
         return unsupported(request, this.#backend, "filesystem.mkdir");
       }
       const result = await this.#command(request, "mkdir", {
@@ -459,7 +454,7 @@ export class FilesystemBridge {
       const requiredCapability = Object.hasOwn(FILESYSTEM_READ_OPERATIONS, request.operation)
         ? "filesystem.read"
         : "filesystem.write";
-      if (!this.#capabilities.has(requiredCapability)) {
+      if (this.#backend.capabilities.operations[requiredCapability].support === "unsupported") {
         return unsupported(request, this.#backend, requiredCapability);
       }
       if (request.operation === "appendFile") {
@@ -476,8 +471,11 @@ export class FilesystemBridge {
       }
       if (request.content !== null) throw new TypeError(`${request.operation} does not accept content.`);
       const privilege = request.operation === "chown" ? "managed-filesystem-owner" : null;
-      if (privilege !== null && !this.#rawCapabilities.has(privilege)) {
-        return unsupported(request, this.#backend, privilege);
+      if (
+        privilege !== null &&
+        this.#backend.capabilities.operations["raw-command.managed-filesystem-owner"].support === "unsupported"
+      ) {
+        return unsupported(request, this.#backend, "raw-command.managed-filesystem-owner");
       }
       const result = await this.#command(request, request.operation, args, null, signal, privilege);
       return success({ value: result.stdout.length === 0 ? null : parseJson(result.stdout) });
@@ -494,8 +492,12 @@ export class FilesystemBridge {
     append: boolean,
     signal?: AbortSignal,
   ): Promise<void> {
-    if (!this.#rawCapabilities.has("input")) {
-      throw new BridgeFailure(unsupported(request, this.#backend, "input"));
+    const input = this.#backend.capabilities.operations["raw-command.input"];
+    if (
+      input.support === "unsupported" ||
+      input.constraints.maxBytes < FILESYSTEM_TRANSFER_CHUNK_BYTES
+    ) {
+      throw new BridgeFailure(unsupported(request, this.#backend, "raw-command.input"));
     }
     if (signal?.aborted) {
       throw new BridgeFailure(cancelled(request, this.#backend));

@@ -8,6 +8,7 @@ import type {
   SandboxBackend,
   StartCommandRequest,
 } from "../../src/runtime/index.js";
+import { TEST_CAPABILITIES } from "../fixtures/runtime-capabilities.js";
 
 const REFERENCE = { backendId: "commands", backendType: "test" } as const;
 
@@ -85,8 +86,7 @@ function unavailable(requestId: string, operation: string): ClientFailure {
 function backend(raw: ControlledRawCommand): SandboxBackend {
   return {
     reference: REFERENCE,
-    capabilities: ["command.start", "command.detached"],
-    rawCommandCapabilities: [],
+    capabilities: TEST_CAPABILITIES,
     createSandbox: (request) => Promise.resolve(unavailable(request.requestId, "createSandbox")),
     getSandbox: (request) => Promise.resolve(unavailable(request.requestId, "getSandbox")),
     listSandboxes: (request) => Promise.resolve(unavailable(request.requestId, "listSandboxes")),

@@ -7,14 +7,15 @@ import { EmbeddedSandboxClient } from "../../src/runtime/index.js";
 import type {
   ClientFailure,
   RawCommand,
-  RawCommandCapability,
   RawCommandEvent,
   RequestMetadata,
   SandboxBackend,
+  SandboxCapabilities,
   StartRawCommandResult,
   StartRawCommandRequest,
 } from "../../src/runtime/index.js";
 import { createFileSystem } from "../../src/vercel/filesystem.js";
+import { testCapabilitiesWithOperationSupport } from "../fixtures/runtime-capabilities.js";
 
 const REFERENCE = { backendId: "memory-filesystem", backendType: "test" } as const;
 const ERROR_PREFIX = "LOCALBOX_FILESYSTEM_ERROR:";
@@ -54,17 +55,21 @@ interface RecordedCommand {
 
 class MemoryFilesystemBackend implements SandboxBackend {
   readonly reference = REFERENCE;
-  readonly capabilities = ["filesystem.read", "filesystem.write", "filesystem.mkdir"] as const;
-  readonly rawCommandCapabilities: readonly RawCommandCapability[];
+  readonly capabilities: SandboxCapabilities;
   readonly files = new Map<string, Buffer>();
   readonly transfers = new Map<string, Buffer>();
   readonly commands: RecordedCommand[] = [];
 
-  constructor(rawCommandCapabilities: readonly RawCommandCapability[] = [
-    "input",
-    "managed-filesystem-owner",
-  ]) {
-    this.rawCommandCapabilities = rawCommandCapabilities;
+  constructor(rawSupport: {
+    readonly input: boolean;
+    readonly managedOwner: boolean;
+  } = { input: true, managedOwner: true }) {
+    this.capabilities = testCapabilitiesWithOperationSupport({
+      "raw-command.input": rawSupport.input ? "native" : "unsupported",
+      "raw-command.managed-filesystem-owner": rawSupport.managedOwner
+        ? "native"
+        : "unsupported",
+    });
   }
 
   createSandbox = (request: Parameters<SandboxBackend["createSandbox"]>[0]) => unavailable(request, "createSandbox");
@@ -235,7 +240,7 @@ describe("neutral filesystem bridge", () => {
   });
 
   test("rejects paths and unsupported transfer or privilege capabilities before starting", async () => {
-    const backend = new MemoryFilesystemBackend([]);
+    const backend = new MemoryFilesystemBackend({ input: false, managedOwner: false });
     const bridge = new FilesystemBridge(backend);
 
     const invalidPath = await bridge.writeFile({

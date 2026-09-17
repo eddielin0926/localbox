@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import type {
   ClientFailure,
   ClientResult,
+  CreateSandboxRequest,
   JsonObject,
   ProcessRecord,
   RequestMetadata,
@@ -54,11 +55,13 @@ class BoundaryClient implements SandboxClient {
     exitCode: number;
   }>();
   readonly operations: string[] = [];
+  readonly createRequests: CreateSandboxRequest[] = [];
   readonly signals: string[] = [];
   #processSequence = 0;
 
   async createSandbox(request: Parameters<SandboxClient["createSandbox"]>[0]) {
     this.operations.push("createSandbox");
+    this.createRequests.push(request);
     if (this.sandboxes.has(request.sandboxId)) {
       return failure(request, "already-exists", "LOCALBOX_SANDBOX_ALREADY_EXISTS", "sandbox", request.sandboxId);
     }
@@ -329,6 +332,45 @@ describe("Vercel compatibility through SandboxClient", () => {
       "listSandboxes",
       "deleteSandbox",
     ]));
+  });
+
+  test("constructs only the typed guarantees required by the supported Vercel surface", async () => {
+    const client = new BoundaryClient();
+    setSandboxClientFactory(() => client);
+
+    await Sandbox.create({
+      name: "boundary-requirements",
+      persistent: false,
+      ports: [3000],
+      resources: { vcpus: 2 },
+      source: { type: "tarball", url: "https://example.test/source.tar.gz" },
+    });
+
+    expect(client.createRequests).toHaveLength(1);
+    expect(client.createRequests[0]?.requirements).toEqual([
+      { type: "operation", operation: "command.start", acceptableSupport: ["native", "emulated", "partial"] },
+      { type: "operation", operation: "command.detached", acceptableSupport: ["native", "emulated", "partial"] },
+      { type: "operation", operation: "filesystem.mkdir", acceptableSupport: ["native", "emulated", "partial"] },
+      { type: "operation", operation: "filesystem.read", acceptableSupport: ["native", "emulated", "partial"] },
+      { type: "operation", operation: "filesystem.write", acceptableSupport: ["native", "emulated", "partial"] },
+      { type: "operation", operation: "endpoint.expose", acceptableSupport: ["native", "emulated", "partial"] },
+      { type: "operation", operation: "source.tarball", acceptableSupport: ["native", "emulated", "partial"] },
+      { type: "artifacts", kinds: ["oci-image", "tarball"], acceptableSupport: ["native", "emulated", "partial"] },
+      {
+        type: "networking",
+        mode: "allow-all",
+        portExposure: "loopback",
+        customPolicy: false,
+        acceptableSupport: ["native", "emulated", "partial"],
+      },
+      {
+        type: "resources",
+        vcpus: 2,
+        memoryBytes: 4_294_967_296,
+        enforcement: "hard",
+        acceptableSupport: ["native", "emulated", "partial"],
+      },
+    ]);
   });
 
   test("commands, callback streams, files, endpoints, timeouts, aborts, and failures are observable client values", async () => {
