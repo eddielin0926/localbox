@@ -814,6 +814,17 @@ export class EmbeddedSandboxClient implements SandboxClient {
     let outcome = state.outcome;
     if (outcome === undefined) {
       const scope = deadlineScope(request);
+      if (scope.expired()) {
+        scope.dispose();
+        return processFailure(
+          request,
+          this.backendReference,
+          "LOCALBOX_DEADLINE_EXCEEDED",
+          "The operation timed out.",
+          "deadline-exceeded",
+          "waitForCommand",
+        );
+      }
       const aborted = Promise.withResolvers<ProcessOutcome>();
       const abort = (): void => aborted.reject(new DOMException("The operation timed out", "AbortError"));
       scope.signal?.addEventListener("abort", abort, { once: true });
@@ -856,6 +867,17 @@ export class EmbeddedSandboxClient implements SandboxClient {
     let delivery = state.signals.get(request.signal);
     if (delivery === undefined) {
       const scope = deadlineScope(request);
+      if (scope.expired()) {
+        scope.dispose();
+        return processFailure(
+          request,
+          this.backendReference,
+          "LOCALBOX_DEADLINE_EXCEEDED",
+          "The operation timed out.",
+          "deadline-exceeded",
+          "signalProcess",
+        );
+      }
       delivery = state.raw.signal(request.signal, scope.signal).finally(scope.dispose);
       state.signals.set(request.signal, delivery);
       void delivery.catch(() => {
@@ -904,6 +926,17 @@ export class EmbeddedSandboxClient implements SandboxClient {
     }
 
     const scope = deadlineScope(request);
+    if (scope.expired()) {
+      scope.dispose();
+      return processFailure(
+        request,
+        this.backendReference,
+        "LOCALBOX_DEADLINE_EXCEEDED",
+        "The operation timed out.",
+        "deadline-exceeded",
+        "readCommandOutput",
+      );
+    }
     try {
       const version = state.version;
       const page = outputPage(state, request, cursor);
