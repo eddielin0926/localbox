@@ -4,11 +4,9 @@ import Dockerode from "dockerode";
 import {
   DockerUnavailableError,
   ImagePullError,
-} from "../vercel/errors.js";
+} from "./errors.js";
 
-export const docker = new Dockerode();
-
-let connected = false;
+const connectedClients = new WeakSet<Dockerode>();
 
 interface DockerError extends Error {
   statusCode?: number;
@@ -59,19 +57,19 @@ export function translateDockerError(error: unknown): never {
   throw error;
 }
 
-export async function ensureDocker(signal?: AbortSignal): Promise<void> {
+export async function ensureDocker(docker: Dockerode, signal?: AbortSignal): Promise<void> {
   throwIfAborted(signal);
-  if (connected) return;
+  if (connectedClients.has(docker)) return;
   try {
     await docker.ping();
     throwIfAborted(signal);
-    connected = true;
+    connectedClients.add(docker);
   } catch (error) {
     translateDockerError(error);
   }
 }
 
-export async function ensureImage(image: string, signal?: AbortSignal): Promise<void> {
+export async function ensureImage(docker: Dockerode, image: string, signal?: AbortSignal): Promise<void> {
   throwIfAborted(signal);
   try {
     await docker.getImage(image).inspect();
@@ -126,6 +124,7 @@ async function inspectUntilFinished(exec: Dockerode.Exec): Promise<Dockerode.Exe
 }
 
 export async function rawExec(
+  docker: Dockerode,
   container: Dockerode.Container,
   options: RawExecOptions,
 ): Promise<RawExecResult> {

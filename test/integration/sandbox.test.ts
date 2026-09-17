@@ -1,3 +1,4 @@
+import Dockerode from "dockerode";
 import { randomUUID } from "node:crypto";
 import * as localFs from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,13 +7,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import {
   Command,
+  MANAGED_IMAGES,
   PortNotExposedError,
   Sandbox,
   SandboxAlreadyExistsError,
   SandboxNotFoundError,
 } from "../../src/vercel/index.js";
-import { docker } from "../../src/core/docker.js";
-import { dockerContainerName } from "../../src/vercel/sandbox.js";
+import { dockerContainerName } from "../../src/backends/docker/sandbox.js";
+const docker = new Dockerode();
 
 const ownedNames = new Set<string>();
 const TARBALL_SOURCE =
@@ -137,6 +139,7 @@ describe("Docker-backed sandbox contracts", () => {
     const name = testName();
     const sandbox = await Sandbox.create({
       name,
+      runtime: "node24",
       source: { type: "tarball", url: TARBALL_SOURCE },
       resources: { vcpus: 1 },
       networkPolicy: "deny-all",
@@ -152,6 +155,11 @@ describe("Docker-backed sandbox contracts", () => {
     expect(sandbox.failoverRegions).toEqual(["sfo1"]);
     expect(sandbox.vcpus).toBe(1);
     expect(sandbox.memory).toBe(2_048);
+    expect(sandbox.runtime).toBe("node24");
+    expect(sandbox.image).toBe(MANAGED_IMAGES.node24);
+    const fetched = await Sandbox.get({ name });
+    expect(fetched.runtime).toBe("node24");
+    expect(fetched.image).toBe(MANAGED_IMAGES.node24);
 
     const info = await docker.getContainer(dockerContainerName(name)).inspect();
     expect(info.HostConfig.NanoCpus).toBe(1_000_000_000);

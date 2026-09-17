@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import type { SandboxClient } from "../../src/runtime/index.js";
 import {
   DockerUnavailableError,
   ImagePullError,
@@ -11,9 +12,10 @@ import {
   UnsupportedSandboxCapabilityError,
 } from "../../src/vercel/index.js";
 import type { SandboxCreateOptions } from "../../src/vercel/types.js";
-import { dockerContainerName } from "../../src/vercel/sandbox.js";
-import { resolveSandboxPath } from "../../src/vercel/filesystem.js";
-import { resolveSandboxImage } from "../../src/vercel/managed-images.js";
+import { InvalidSandboxOptionsError as DockerInvalidSandboxOptionsError } from "../../src/backends/docker/errors.js";
+import { resolveSandboxImage } from "../../src/backends/docker/managed-images.js";
+import { dockerContainerName } from "../../src/backends/docker/sandbox.js";
+import { createFileSystem, resolveSandboxPath } from "../../src/vercel/filesystem.js";
 
 describe("sandbox option validation", () => {
   test("rejects invalid create options before contacting Docker", async () => {
@@ -77,7 +79,7 @@ describe("sandbox option validation", () => {
       "registry.example.test/team/image:v1",
     );
     expect(() => resolveSandboxImage({ image: "vercel/sandbox/node:999" })).toThrow(
-      InvalidSandboxOptionsError,
+      DockerInvalidSandboxOptionsError,
     );
   });
 
@@ -95,6 +97,19 @@ describe("sandbox option validation", () => {
     expect(resolveSandboxPath("a/../b.txt")).toBe("/vercel/sandbox/b.txt");
     expect(resolveSandboxPath("/tmp/file")).toBe("/tmp/file");
     expect(() => resolveSandboxPath("bad\0path")).toThrow(/NUL/);
+  });
+
+  test("rejects privileged filesystem operations for custom images", async () => {
+    const filesystem = createFileSystem(
+      {} as SandboxClient,
+      "custom-image-sandbox",
+      "registry.example.test/team/image:v1",
+      async () => undefined,
+    );
+
+    await expect(filesystem.chown("file.txt", 1000, 1000)).rejects.toBeInstanceOf(
+      UnsupportedSandboxCapabilityError,
+    );
   });
 
   test("public errors provide corrective actions without daemon response text", () => {

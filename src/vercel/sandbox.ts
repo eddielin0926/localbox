@@ -1,37 +1,32 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import * as localFs from "node:fs/promises";
 import { dirname, resolve as resolveLocalPath } from "node:path";
 import { posix } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
-import { PassThrough, Writable } from "node:stream";
-import type Dockerode from "dockerode";
-import { Command, type CommandRunOptions, CommandFinished, startCommand } from "./command.js";
+import { Readable } from "node:stream";
+import type {
+  SandboxClient,
+  SandboxRecord,
+  SandboxRequirement,
+  SandboxSource as RuntimeSandboxSource,
+} from "../runtime/index.js";
+import { Command, type CommandRunOptions, CommandFinished, createCommand } from "./command.js";
 import {
-  abortError,
-  docker,
-  dockerStatus,
-  ensureDocker,
-  ensureImage,
-  isConflict,
-  isNotFound,
-  rawExec,
+  createSandboxClient,
+  mutationMetadata,
+  requestMetadata,
   throwIfAborted,
-  translateDockerError,
-} from "../core/docker.js";
+  unwrap,
+  withAbort,
+} from "./client.js";
 import {
   InvalidSandboxOptionsError,
-  LocalboxError,
   PortNotExposedError,
   SandboxAlreadyExistsError,
   SandboxDeletedError,
   SandboxNotFoundError,
-  SandboxSourceError,
-  UnsupportedImageError,
   UnsupportedSandboxCapabilityError,
 } from "./errors.js";
 import { createFileSystem, FileSystem } from "./filesystem.js";
-import { resolveSandboxImage } from "./managed-images.js";
 import type {
   SandboxCreateOptions,
   SandboxGetOptions,
@@ -48,124 +43,7 @@ import type {
 
 const DEFAULT_TIMEOUT = 300_000;
 const WORKSPACE = "/vercel/sandbox";
-const LABEL_PREFIX = "dev.localbox";
-const resumeContext = new AsyncLocalStorage<Sandbox>();
-
-const WATCHDOG = String.raw`
-import * as fsp from "node:fs/promises";
-import { setTimeout as delay } from "node:timers/promises";
-const timeout = Number(process.argv[1]);
-const root = "/tmp/localbox";
-const deadlinePath = root + "/deadline";
-await fsp.mkdir("/vercel/sandbox", { recursive: true });
-await fsp.mkdir(root, { recursive: true });
-await fsp.writeFile(deadlinePath, String(Date.now() + timeout));
-for (;;) {
-  const deadline = Number(await fsp.readFile(deadlinePath, "utf8"));
-  const remaining = deadline - Date.now();
-  if (remaining <= 0) process.exit(0);
-  await delay(Math.min(remaining, 100));
-}
-`;
-
-const EXTEND_DEADLINE = String.raw`
-import * as fs from "node:fs/promises";
-import { setTimeout as delay } from "node:timers/promises";
-const path = "/tmp/localbox/deadline";
-const lock = path + ".lock";
-for (;;) {
-  try {
-    await fs.mkdir(lock);
-    break;
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    await delay(5);
-  }
-}
-let next;
-try {
-  next = Number(await fs.readFile(path, "utf8")) + Number(process.argv[1]);
-  const temporary = path + "." + process.pid;
-  await fs.writeFile(temporary, String(next));
-  await fs.rename(temporary, path);
-} finally {
-  await fs.rm(lock, { recursive: true, force: true });
-}
-process.stdout.write(String(next));
-`;
-
-const GIT_ASKPASS = String.raw`#!/bin/sh
-case "$1" in
-  *sername*) printf '%s\n' "$LOCALBOX_GIT_USERNAME" ;;
-  *) printf '%s\n' "$LOCALBOX_GIT_PASSWORD" ;;
-esac
-`;
-
-const EXTRACT_TARBALL = String.raw`
-import { createWriteStream } from "node:fs";
-import { rm } from "node:fs/promises";
-import { posix } from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { spawnSync } from "node:child_process";
-const [url, workspace] = process.argv.slice(1);
-const archive = "/tmp/localbox-source-" + process.pid + ".tar";
-try {
-  const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok || response.body === null) {
-    throw new Error("Source download returned HTTP " + response.status);
-  }
-  await pipeline(Readable.fromWeb(response.body), createWriteStream(archive, { mode: 0o600 }));
-  const listing = spawnSync("tar", ["-tf", archive], { encoding: "utf8" });
-  if (listing.status !== 0) throw new Error(listing.stderr || "Could not inspect source archive");
-  for (const entry of listing.stdout.split("\n").filter(Boolean)) {
-    const normalized = posix.normalize(entry);
-    if (posix.isAbsolute(entry) || normalized === ".." || normalized.startsWith("../")) {
-      throw new Error("Source archive contains a path outside the workspace");
-    }
-  }
-  const extracted = spawnSync("tar", ["-xf", archive, "-C", workspace], { encoding: "utf8" });
-  if (extracted.status !== 0) throw new Error(extracted.stderr || "Could not extract source archive");
-} finally {
-  await rm(archive, { force: true });
-}
-`;
-
-type MaterializableSource = Exclude<SandboxSource, { type: "snapshot" }>;
-
-interface NormalizedCreateOptions {
-  name: string;
-  image: string;
-  runtime?: string;
-  ports: number[];
-  timeout: number;
-  env: Record<string, string>;
-  tags: Record<string, string>;
-  region?: string;
-  failoverRegions: string[];
-  persistent: boolean;
-  networkMode: "bridge" | "none";
-  disconnectNetworkAfterSource: boolean;
-  source?: MaterializableSource;
-  vcpus?: number;
-  memoryBytes?: number;
-  signal?: AbortSignal;
-}
-
-interface SandboxMetadata {
-  name: string;
-  image: string;
-  runtime?: string;
-  ports: number[];
-  timeout: number;
-  persistent: boolean;
-  tags: Record<string, string>;
-  region?: string;
-  failoverRegions: string[];
-  vcpus?: number;
-  memoryBytes?: number;
-  createdAt: Date;
-}
+const DEFAULT_IMAGE = "vcr.vercel.com/vercel/sandbox/universal";
 
 interface SignalOptions {
   signal?: AbortSignal;
@@ -175,26 +53,22 @@ interface DownloadOptions extends SignalOptions {
   mkdirRecursive?: boolean;
 }
 
-interface DockerPortBinding {
-  HostIp?: string;
-  HostPort?: string;
-}
-
-export function dockerContainerName(name: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 40) || "sandbox";
-  const hash = createHash("sha256").update(name).digest("hex").slice(0, 12);
-  return `localbox-${slug}-${hash}`;
-}
-
-function validateName(name: string): void {
-  const length = name.trim().length;
-  if (length < 1 || length > 128) {
-    throw new InvalidSandboxOptionsError("Sandbox name must contain 1 to 128 non-whitespace characters.");
-  }
+interface FrontendCreateSpec {
+  readonly name: string;
+  readonly bootSource:
+    | { readonly type: "runtime"; readonly runtime: string }
+    | { readonly type: "image"; readonly image: string };
+  readonly source: RuntimeSandboxSource | null;
+  readonly persistent: boolean;
+  readonly timeoutMs: number;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly tags: Readonly<Record<string, string>>;
+  readonly ports: readonly number[];
+  readonly networkPolicy: "allow-all" | "deny-all";
+  readonly resources: { readonly vcpus: number | null; readonly memoryBytes: number | null };
+  readonly region: string | null;
+  readonly failoverRegions: readonly string[];
+  readonly requirements: readonly SandboxRequirement[];
 }
 
 function validateOptionalText(value: string | undefined, field: string): void {
@@ -203,91 +77,36 @@ function validateOptionalText(value: string | undefined, field: string): void {
   }
 }
 
-function normalizeSource(source: SandboxSource | undefined): MaterializableSource | undefined {
-  if (source === undefined) return undefined;
-  if (source.type === "snapshot") {
-    throw new UnsupportedSandboxCapabilityError("snapshot sources");
-  }
-  if (source.type === "git") {
-    validateOptionalText(source.url, "Git source URL");
-    validateOptionalText(source.revision, "Git source revision");
-    if (source.depth !== undefined && (!Number.isInteger(source.depth) || source.depth < 1)) {
-      throw new InvalidSandboxOptionsError("Git source depth must be a positive integer.");
-    }
-    if ("username" in source) {
-      validateOptionalText(source.username, "Git source username");
-      if (source.password.includes("\0")) {
-        throw new InvalidSandboxOptionsError("Git source password must not contain NUL.");
-      }
-    }
-    return source;
-  }
+function runtimeSource(source: SandboxSource | undefined): RuntimeSandboxSource | null {
+  if (source === undefined) return null;
+  if (source.type === "snapshot") throw new UnsupportedSandboxCapabilityError("snapshot sources");
   if (source.type === "tarball") {
     validateOptionalText(source.url, "Tarball source URL");
-    return source;
+    return { type: "tarball", url: source.url };
   }
-  throw new InvalidSandboxOptionsError("Sandbox source type is invalid.");
+  validateOptionalText(source.url, "Git source URL");
+  validateOptionalText(source.revision, "Git source revision");
+  if (source.depth !== undefined && (!Number.isInteger(source.depth) || source.depth < 1)) {
+    throw new InvalidSandboxOptionsError("Git source depth must be a positive integer.");
+  }
+  if ("username" in source) {
+    validateOptionalText(source.username, "Git source username");
+    if (source.password.includes("\0")) {
+      throw new InvalidSandboxOptionsError("Git source password must not contain NUL.");
+    }
+  }
+  return {
+    type: "git",
+    url: source.url,
+    revision: source.revision ?? null,
+    depth: source.depth ?? null,
+    credentials: "username" in source
+      ? { username: source.username, password: source.password }
+      : null,
+  };
 }
 
-function normalizeCreateOptions(options: SandboxCreateOptions = {}): NormalizedCreateOptions {
-  const name = options.name ?? `localbox-${randomUUID()}`;
-  validateName(name);
-  const image = resolveSandboxImage({
-    ...(options.image === undefined ? {} : { image: options.image }),
-    ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
-  });
-  const timeout = options.timeout ?? DEFAULT_TIMEOUT;
-  if (!Number.isFinite(timeout) || !Number.isInteger(timeout) || timeout <= 0) {
-    throw new InvalidSandboxOptionsError("Sandbox timeout must be a positive finite integer in milliseconds.");
-  }
-
-  const ports = options.ports === undefined ? [] : [...options.ports];
-  if (ports.length > 15) {
-    throw new InvalidSandboxOptionsError("A sandbox can expose at most 15 ports.");
-  }
-  const uniquePorts = new Set(ports);
-  if (uniquePorts.size !== ports.length) {
-    throw new InvalidSandboxOptionsError("Sandbox ports must be unique.");
-  }
-  for (const port of ports) {
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-      throw new InvalidSandboxOptionsError(`Invalid TCP port ${String(port)}. Use an integer from 1 to 65535.`);
-    }
-  }
-
-  const env = { ...options.env };
-  for (const [key, value] of Object.entries(env)) {
-    if (key.length === 0 || key.includes("=") || key.includes("\0") || key.startsWith("LOCALBOX_")) {
-      throw new InvalidSandboxOptionsError(
-        `Invalid environment key "${key}". Keys must be non-empty, omit = and NUL, and not use LOCALBOX_.`,
-      );
-    }
-    if (value.includes("\0")) {
-      throw new InvalidSandboxOptionsError(`Environment value for "${key}" must not contain NUL.`);
-    }
-  }
-
-  const tags = { ...options.tags };
-  if (Object.keys(tags).length > 5) {
-    throw new InvalidSandboxOptionsError("A sandbox can have at most 5 tags.");
-  }
-  for (const [key, value] of Object.entries(tags)) {
-    if (key.trim().length === 0 || key.includes("\0") || value.includes("\0")) {
-      throw new InvalidSandboxOptionsError("Sandbox tag keys must be non-empty and tag values must omit NUL.");
-    }
-  }
-
-  const region = options.region;
-  validateOptionalText(region, "Sandbox region");
-  const failoverRegions = options.failoverRegions === undefined ? [] : [...options.failoverRegions];
-  for (const failoverRegion of failoverRegions) validateOptionalText(failoverRegion, "Sandbox failover region");
-  if (new Set(failoverRegions).size !== failoverRegions.length) {
-    throw new InvalidSandboxOptionsError("Sandbox failover regions must be unique.");
-  }
-  if (region !== undefined && failoverRegions.includes(region)) {
-    throw new InvalidSandboxOptionsError("Sandbox failover regions must not include the primary region.");
-  }
-
+function normalizeCreateOptions(options: SandboxCreateOptions = {}): FrontendCreateSpec {
   if (options.mounts !== undefined && Object.keys(options.mounts).length > 0) {
     throw new UnsupportedSandboxCapabilityError("drive mounts");
   }
@@ -297,232 +116,49 @@ function normalizeCreateOptions(options: SandboxCreateOptions = {}): NormalizedC
   if (typeof options.networkPolicy === "object") {
     throw new UnsupportedSandboxCapabilityError("custom network policies");
   }
-
-  const vcpus = options.resources?.vcpus;
-  if (vcpus !== undefined && (!Number.isFinite(vcpus) || !Number.isInteger(vcpus) || vcpus <= 0)) {
-    throw new InvalidSandboxOptionsError("Sandbox vCPUs must be a positive finite integer.");
-  }
-  const source = normalizeSource(options.source);
-  const denyNetwork = options.networkPolicy === "deny-all";
-  if (denyNetwork && ports.length > 0) {
-    throw new UnsupportedSandboxCapabilityError("simultaneous deny-all networking and exposed ports");
+  if (options.image !== undefined && options.runtime !== undefined) {
+    throw new InvalidSandboxOptionsError("Choose either image or runtime, not both.");
   }
   throwIfAborted(options.signal);
-  return {
-    name,
-    image,
-    ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
-    ports,
-    timeout,
-    env,
-    tags,
-    ...(region === undefined ? {} : { region }),
-    failoverRegions,
-    persistent: options.persistent ?? true,
-    networkMode: denyNetwork && source === undefined ? "none" : "bridge",
-    disconnectNetworkAfterSource: denyNetwork && source !== undefined,
-    ...(source === undefined ? {} : { source }),
-    ...(vcpus === undefined
-      ? {}
-      : {
-          vcpus,
-          memoryBytes: vcpus * 2_048 * 1_048_576,
-        }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  };
-}
 
-async function runSourceCommand(
-  container: Dockerode.Container,
-  sourceType: "git" | "tarball",
-  options: {
-    cmd: string[];
-    env?: string[];
-    stdin?: Buffer;
-    signal?: AbortSignal;
-  },
-): Promise<void> {
-  try {
-    const result = await rawExec(container, options);
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr.toString("utf8").trim() || `Source command exited with ${result.exitCode}.`);
-    }
-  } catch (error) {
-    if (error instanceof SandboxSourceError) throw error;
-    throw new SandboxSourceError(sourceType, error);
+  const source = runtimeSource(options.source);
+  const persistent = options.persistent ?? true;
+  const networkPolicy = options.networkPolicy ?? "allow-all";
+  const ports = [...(options.ports ?? [])];
+  if (networkPolicy === "deny-all" && ports.length > 0) {
+    throw new UnsupportedSandboxCapabilityError("simultaneous deny-all networking and exposed ports");
   }
-}
-
-async function clearWorkspace(
-  container: Dockerode.Container,
-  sourceType: "git" | "tarball",
-  signal?: AbortSignal,
-): Promise<void> {
-  await runSourceCommand(container, sourceType, {
-    cmd: [
-      "/bin/sh",
-      "-c",
-      `find ${WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +`,
-    ],
-    ...(signal === undefined ? {} : { signal }),
-  });
-}
-
-async function materializeGitSource(
-  container: Dockerode.Container,
-  source: Extract<MaterializableSource, { type: "git" }>,
-  signal?: AbortSignal,
-): Promise<void> {
-  const authenticated = "username" in source;
-  const askpassPath = "/tmp/localbox-git-askpass";
-  const env = [
-    "GIT_TERMINAL_PROMPT=0",
-    ...(authenticated
-      ? [
-          `GIT_ASKPASS=${askpassPath}`,
-          "GIT_ASKPASS_REQUIRE=force",
-          `LOCALBOX_GIT_USERNAME=${source.username}`,
-          `LOCALBOX_GIT_PASSWORD=${source.password}`,
-        ]
-      : []),
+  const vcpus = options.resources?.vcpus ?? null;
+  const requirements: SandboxRequirement[] = [
+    { capability: `sandbox.network.${networkPolicy}`, parameters: null },
+    ...(persistent ? [{ capability: "sandbox.persistence" as const, parameters: null }] : []),
+    ...(vcpus === null ? [] : [{ capability: "sandbox.resource-limits" as const, parameters: null }]),
+    ...(ports.length === 0 ? [] : [{ capability: "endpoint.expose" as const, parameters: null }]),
+    ...(source === null
+      ? []
+      : [{ capability: `sandbox.source.${source.type}` as const, parameters: null }]),
   ];
-  try {
-    if (authenticated) {
-      await runSourceCommand(container, "git", {
-        cmd: ["/bin/sh", "-c", `cat > ${askpassPath} && chmod 0700 ${askpassPath}`],
-        stdin: Buffer.from(GIT_ASKPASS),
-        ...(signal === undefined ? {} : { signal }),
-      });
-    }
-    if (source.revision === undefined) {
-      await runSourceCommand(container, "git", {
-        cmd: [
-          "git",
-          "clone",
-          ...(source.depth === undefined ? [] : [`--depth=${source.depth}`]),
-          "--",
-          source.url,
-          WORKSPACE,
-        ],
-        env,
-        ...(signal === undefined ? {} : { signal }),
-      });
-      return;
-    }
 
-    await runSourceCommand(container, "git", {
-      cmd: ["git", "-C", WORKSPACE, "init"],
-      env,
-      ...(signal === undefined ? {} : { signal }),
-    });
-    await runSourceCommand(container, "git", {
-      cmd: ["git", "-C", WORKSPACE, "remote", "add", "origin", source.url],
-      env,
-      ...(signal === undefined ? {} : { signal }),
-    });
-    await runSourceCommand(container, "git", {
-      cmd: [
-        "git",
-        "-C",
-        WORKSPACE,
-        "fetch",
-        "--no-tags",
-        ...(source.depth === undefined ? [] : [`--depth=${source.depth}`]),
-        "origin",
-        source.revision,
-      ],
-      env,
-      ...(signal === undefined ? {} : { signal }),
-    });
-    await runSourceCommand(container, "git", {
-      cmd: ["git", "-C", WORKSPACE, "checkout", "--detach", "FETCH_HEAD"],
-      env,
-      ...(signal === undefined ? {} : { signal }),
-    });
-  } finally {
-    if (authenticated) {
-      await rawExec(container, {
-        cmd: ["rm", "-f", askpassPath],
-        ...(signal === undefined ? {} : { signal }),
-      }).catch(() => undefined);
-    }
-  }
-}
-
-async function materializeSource(
-  container: Dockerode.Container,
-  source: MaterializableSource,
-  signal?: AbortSignal,
-): Promise<void> {
-  await clearWorkspace(container, source.type, signal);
-  if (source.type === "git") {
-    await materializeGitSource(container, source, signal);
-    return;
-  }
-  await runSourceCommand(container, "tarball", {
-    cmd: ["node", "--input-type=module", "-e", EXTRACT_TARBALL, source.url, WORKSPACE],
-    ...(signal === undefined ? {} : { signal }),
-  });
-}
-
-function metadataFromInspect(name: string, info: Dockerode.ContainerInspectInfo): SandboxMetadata {
-  const labels = info.Config.Labels;
-  if (labels[`${LABEL_PREFIX}.managed`] !== "true" || labels[`${LABEL_PREFIX}.name`] !== name) {
-    throw new SandboxNotFoundError(name);
-  }
-  const timeout = Number(labels[`${LABEL_PREFIX}.timeout`]);
-  const ports = JSON.parse(labels[`${LABEL_PREFIX}.ports`] ?? "[]") as number[];
-  const tags = JSON.parse(labels[`${LABEL_PREFIX}.tags`] ?? "{}") as Record<string, string>;
-  const failoverRegions = JSON.parse(labels[`${LABEL_PREFIX}.failoverRegions`] ?? "[]") as string[];
-  const nanoCpus = info.HostConfig.NanoCpus ?? 0;
-  const memoryBytes = info.HostConfig.Memory ?? 0;
   return {
-    name,
-    image: labels[`${LABEL_PREFIX}.image`] ?? info.Config.Image,
-    ...(labels[`${LABEL_PREFIX}.runtime`] === undefined
-      ? {}
-      : { runtime: labels[`${LABEL_PREFIX}.runtime`] }),
+    name: options.name ?? `localbox-${randomUUID()}`,
+    bootSource: options.runtime !== undefined
+      ? { type: "runtime", runtime: options.runtime }
+      : { type: "image", image: options.image ?? DEFAULT_IMAGE },
+    source,
+    persistent,
+    timeoutMs: options.timeout ?? DEFAULT_TIMEOUT,
+    environment: { ...options.env },
+    tags: { ...options.tags },
     ports,
-    timeout,
-    persistent: labels[`${LABEL_PREFIX}.persistent`] === "true",
-    tags,
-    ...(labels[`${LABEL_PREFIX}.region`] === undefined
-      ? {}
-      : { region: labels[`${LABEL_PREFIX}.region`] }),
-    failoverRegions,
-    ...(nanoCpus > 0 ? { vcpus: nanoCpus / 1_000_000_000 } : {}),
-    ...(memoryBytes > 0 ? { memoryBytes } : {}),
-    createdAt: new Date(labels[`${LABEL_PREFIX}.created`] ?? info.Created),
+    networkPolicy,
+    resources: {
+      vcpus,
+      memoryBytes: vcpus === null ? null : vcpus * 2_048 * 1_048_576,
+    },
+    region: options.region ?? null,
+    failoverRegions: [...(options.failoverRegions ?? [])],
+    requirements,
   };
-}
-
-function mapStatus(info: Dockerode.ContainerInspectInfo): SandboxStatus {
-  if (info.State.Dead || info.State.OOMKilled || info.State.Error.length > 0) return "failed";
-  switch (info.State.Status) {
-    case "created":
-    case "restarting":
-      return "pending";
-    case "running":
-      return "running";
-    case "removing":
-      return "stopping";
-    case "dead":
-      return "failed";
-    default:
-      return "stopped";
-  }
-}
-
-function portMapFromInspect(info: Dockerode.ContainerInspectInfo, declared: readonly number[]): Map<number, number> {
-  const output = new Map<number, number>();
-  for (const port of declared) {
-    const key = `${port}/tcp`;
-    const live = info.NetworkSettings.Ports?.[key]?.[0];
-    const configured = (info.HostConfig.PortBindings?.[key] as DockerPortBinding[] | undefined)?.[0];
-    const hostPort = live?.HostPort ?? configured?.HostPort;
-    if (hostPort !== undefined && hostPort.length > 0) output.set(port, Number(hostPort));
-  }
-  return output;
 }
 
 function resolveContainerPath(path: string, cwd?: string): string {
@@ -531,61 +167,27 @@ function resolveContainerPath(path: string, cwd?: string): string {
   return posix.resolve(cwd ?? WORKSPACE, path);
 }
 
-async function inspectNamedContainer(name: string, signal?: AbortSignal): Promise<{
-  container: Dockerode.Container;
-  info: Dockerode.ContainerInspectInfo;
-}> {
-  const container = docker.getContainer(dockerContainerName(name));
-  try {
-    const info = await container.inspect(signal === undefined ? undefined : { abortSignal: signal });
-    metadataFromInspect(name, info);
-    return { container, info };
-  } catch (error) {
-    if (isNotFound(error) || error instanceof SandboxNotFoundError) {
-      throw new SandboxNotFoundError(name, error);
-    }
-    translateDockerError(error);
-  }
-}
-
-function timestamp(value: string | undefined, fallback: number): number {
-  if (value === undefined || value.startsWith("0001-")) return fallback;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function listItemFromInspect(info: Dockerode.ContainerInspectInfo): SandboxListItem {
-  const metadata = metadataFromInspect(info.Config.Labels[`${LABEL_PREFIX}.name`] ?? "", info);
-  const createdAt = metadata.createdAt.getTime();
-  const statusUpdatedAt = timestamp(
-    info.State.Running ? info.State.StartedAt : info.State.FinishedAt,
-    createdAt,
-  );
-  const tags = Object.keys(metadata.tags).length === 0 ? undefined : metadata.tags;
-  const nanoCpus = info.HostConfig.NanoCpus ?? 0;
-  const memoryBytes = info.HostConfig.Memory ?? 0;
+function listItem(record: SandboxRecord): SandboxListItem {
   return {
-    name: metadata.name,
-    persistent: metadata.persistent,
-    createdAt,
-    updatedAt: statusUpdatedAt,
-    currentSessionId: info.Id,
-    status: mapStatus(info),
-    ...(nanoCpus > 0 ? { vcpus: nanoCpus / 1_000_000_000 } : {}),
-    ...(memoryBytes > 0 ? { memory: memoryBytes / 1_048_576 } : {}),
-    image: metadata.image,
-    timeout: metadata.timeout,
-    statusUpdatedAt,
-    cwd: info.Config.WorkingDir,
-    ...(tags === undefined ? {} : { tags }),
+    name: record.name,
+    persistent: record.persistent,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    currentSessionId: record.sandboxId,
+    status: record.status,
+    ...(record.resources.vcpus === null ? {} : { vcpus: record.resources.vcpus }),
+    ...(record.resources.memoryBytes === null
+      ? {}
+      : { memory: record.resources.memoryBytes / 1_048_576 }),
+    image: record.bootSource.type === "image" ? record.bootSource.image : "",
+    timeout: record.timeoutMs,
+    statusUpdatedAt: record.statusUpdatedAt,
+    cwd: WORKSPACE,
+    ...(Object.keys(record.tags).length === 0 ? {} : { tags: { ...record.tags } }),
   };
 }
 
-function sandboxPaginator(
-  items: SandboxListItem[],
-  limit: number,
-  start: number,
-): SandboxListResult {
+function sandboxPaginator(items: SandboxListItem[], limit: number, start: number): SandboxListResult {
   const pageAt = (offset: number): SandboxListPage => {
     const sandboxes = items.slice(offset, offset + limit);
     const nextOffset = offset + sandboxes.length;
@@ -613,57 +215,89 @@ function sandboxPaginator(
 }
 
 export class Sandbox {
-  readonly name: string;
-  readonly persistent: boolean;
-  readonly image: string;
-  readonly runtime: string | undefined;
-  readonly ports: readonly number[];
-  readonly timeout: number;
-  readonly tags: Readonly<Record<string, string>>;
-  readonly region: string;
-  readonly failoverRegions: readonly string[];
-  readonly vcpus: number | undefined;
-  readonly memory: number | undefined;
-  readonly createdAt: Date;
-  readonly fs: FileSystem;
-  readonly #container: Dockerode.Container;
+  readonly #client: SandboxClient;
   readonly #onResume: ((sandbox: Sandbox) => Promise<void>) | undefined;
-  #status: SandboxStatus;
-  #expiresAt: Date | undefined;
-  #portMap = new Map<number, number>();
+  #record: SandboxRecord;
   #deleted = false;
-  #lifecycle: Promise<void> = Promise.resolve();
-  #resumePromise: Promise<Dockerode.Container> | undefined;
-  #extension: Promise<void> = Promise.resolve();
+  #resumePromise: Promise<void> | undefined;
+  readonly fs: FileSystem;
 
   private constructor(
-    container: Dockerode.Container,
-    metadata: SandboxMetadata,
-    info: Dockerode.ContainerInspectInfo,
+    client: SandboxClient,
+    record: SandboxRecord,
     onResume?: (sandbox: Sandbox) => Promise<void>,
   ) {
-    this.#container = container;
-    this.name = metadata.name;
-    this.persistent = metadata.persistent;
-    this.image = metadata.image;
-    this.runtime = metadata.runtime;
-    this.ports = Object.freeze([...metadata.ports]);
-    this.timeout = metadata.timeout;
-    this.tags = Object.freeze({ ...metadata.tags });
-    this.region = metadata.region ?? "local";
-    this.failoverRegions = Object.freeze([...metadata.failoverRegions]);
-    this.vcpus = metadata.vcpus;
-    this.memory = metadata.memoryBytes === undefined ? undefined : metadata.memoryBytes / 1_048_576;
-    this.createdAt = metadata.createdAt;
-    this.#status = mapStatus(info);
-    this.#portMap = portMapFromInspect(info, this.ports);
+    this.#client = client;
+    this.#record = record;
     this.#onResume = onResume;
-    this.fs = createFileSystem(async () => this.#ensureRunning());
+    this.fs = createFileSystem(
+      client,
+      record.sandboxId,
+      record.bootSource.type === "image" ? record.bootSource.image : "",
+      async (signal) => this.#ensureRunning(signal),
+    );
+  }
+
+  get name(): string {
+    return this.#record.name;
+  }
+
+  get persistent(): boolean {
+    return this.#record.persistent;
+  }
+
+  get image(): string {
+    return this.#record.bootSource.type === "image" ? this.#record.bootSource.image : "";
+  }
+
+  get runtime(): string | undefined {
+    return this.#record.runtime ?? undefined;
+  }
+
+  get ports(): readonly number[] {
+    return this.#record.ports;
+  }
+
+  get timeout(): number {
+    return this.#record.timeoutMs;
+  }
+
+  get tags(): Readonly<Record<string, string>> {
+    return this.#record.tags;
+  }
+
+  get region(): string {
+    return this.#record.region ?? "local";
+  }
+
+  get failoverRegions(): readonly string[] {
+    return this.#record.failoverRegions;
+  }
+
+  get vcpus(): number | undefined {
+    return this.#record.resources.vcpus ?? undefined;
+  }
+
+  get memory(): number | undefined {
+    return this.#record.resources.memoryBytes === null
+      ? undefined
+      : this.#record.resources.memoryBytes / 1_048_576;
+  }
+
+  get createdAt(): Date {
+    return new Date(this.#record.createdAt);
+  }
+
+  get status(): SandboxStatus {
+    return this.#record.status;
+  }
+
+  get expiresAt(): Date | undefined {
+    return this.#record.expiresAt === null ? undefined : new Date(this.#record.expiresAt);
   }
 
   static async list(options: SandboxListOptions = {}): Promise<SandboxListResult> {
     throwIfAborted(options.signal);
-    await ensureDocker(options.signal);
     const limit = options.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1) {
       throw new InvalidSandboxOptionsError("Sandbox list limit must be a positive integer.");
@@ -672,267 +306,161 @@ export class Sandbox {
     if (!Number.isInteger(start) || start < 0) {
       throw new InvalidSandboxOptionsError("Sandbox list cursor is invalid.");
     }
-
-    const containers = await docker.listContainers({
-      all: true,
-      filters: { label: [`${LABEL_PREFIX}.managed=true`] },
-      ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
-    });
-    const inspected = await Promise.all(containers.map(async (entry) => {
-      try {
-        return await docker.getContainer(entry.Id).inspect(
-          options.signal === undefined ? undefined : { abortSignal: options.signal },
-        );
-      } catch (error) {
-        if (isNotFound(error)) return undefined;
-        translateDockerError(error);
-      }
-    }));
-    const tagFilters = Object.entries(options.tags ?? {});
-    const items = inspected
-      .filter((info): info is Dockerode.ContainerInspectInfo => info !== undefined)
-      .map(listItemFromInspect)
-      .filter((item) => options.namePrefix === undefined || item.name.startsWith(options.namePrefix))
-      .filter((item) => tagFilters.every(([key, value]) => item.tags?.[key] === value));
-    const direction = options.sortOrder === "asc" ? 1 : -1;
-    const sortBy = options.sortBy ?? "createdAt";
-    items.sort((left, right) => {
-      const leftValue = sortBy === "name" ? left.name : left[sortBy] ?? 0;
-      const rightValue = sortBy === "name" ? right.name : right[sortBy] ?? 0;
-      return leftValue < rightValue ? -direction : leftValue > rightValue ? direction : 0;
-    });
-    return sandboxPaginator(items, limit, start);
+    const client = createSandboxClient();
+    const result = unwrap(await withAbort(client.listSandboxes({
+      ...requestMetadata(),
+      namePrefix: options.namePrefix ?? null,
+      tags: { ...options.tags },
+      statuses: [],
+      sortBy: options.sortBy ?? "createdAt",
+      sortOrder: options.sortOrder ?? "desc",
+      limit: 1_000_000,
+      cursor: null,
+    }), options.signal));
+    return sandboxPaginator(result.sandboxes.map(listItem), limit, start);
   }
 
   static async create(options: SandboxCreateOptions = {}): Promise<Sandbox> {
-    return Sandbox.#create(options, undefined, options.onResume);
+    const normalized = normalizeCreateOptions(options);
+    const client = createSandboxClient();
+    const operation = client.createSandbox({
+      ...mutationMetadata(),
+      sandboxId: normalized.name,
+      backend: null,
+      requirements: normalized.requirements,
+      spec: {
+        name: normalized.name,
+        bootSource: normalized.bootSource,
+        source: normalized.source,
+        persistent: normalized.persistent,
+        timeoutMs: normalized.timeoutMs,
+        environment: normalized.environment,
+        tags: normalized.tags,
+        ports: normalized.ports,
+        networkPolicy: normalized.networkPolicy,
+        resources: normalized.resources,
+        region: normalized.region,
+        failoverRegions: normalized.failoverRegions,
+      },
+    });
+    try {
+      const result = unwrap(await withAbort(operation, options.signal));
+      return new Sandbox(client, result.sandbox, options.onResume);
+    } catch (error) {
+      if (options.signal?.aborted) {
+        void operation.then(async (result) => {
+          if (!result.ok) return;
+          await client.deleteSandbox({
+            ...mutationMetadata(),
+            sandboxId: result.value.sandbox.sandboxId,
+          });
+        }).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   static async get(options: SandboxGetOptions): Promise<Sandbox> {
-    validateName(options.name);
     throwIfAborted(options.signal);
-    await ensureDocker(options.signal);
-    const { container, info } = await inspectNamedContainer(options.name, options.signal);
-    const sandbox = new Sandbox(container, metadataFromInspect(options.name, info), info, options.onResume);
-    if (options.resume ?? false) await sandbox.#ensureRunning();
+    const client = createSandboxClient();
+    const initial = unwrap(await withAbort(client.getSandbox({
+      ...mutationMetadata(),
+      sandboxId: options.name,
+      resume: false,
+    }), options.signal));
+    const sandbox = new Sandbox(client, initial.sandbox, options.onResume);
+    if ((options.resume ?? false) && initial.sandbox.status !== "running") {
+      const resumed = unwrap(await withAbort(client.getSandbox({
+        ...mutationMetadata(),
+        sandboxId: options.name,
+        resume: true,
+      }), options.signal));
+      sandbox.#record = resumed.sandbox;
+      if (options.onResume !== undefined) {
+        try {
+          await options.onResume(sandbox);
+        } catch (error) {
+          await sandbox.stop().catch(() => undefined);
+          throw error;
+        }
+      }
+    }
     return sandbox;
   }
 
   static async getOrCreate(options: SandboxGetOrCreateOptions): Promise<Sandbox> {
-    if (options.name !== undefined) validateName(options.name);
     throwIfAborted(options.signal);
     if (options.name !== undefined) {
       try {
-        const sandbox = await Sandbox.get({
+        return await Sandbox.get({
           name: options.name,
-          resume: false,
+          ...(options.resume === undefined ? {} : { resume: options.resume }),
           ...(options.onResume === undefined ? {} : { onResume: options.onResume }),
           ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
-        if (options.resume ?? false) await sandbox.#ensureRunning();
-        return sandbox;
       } catch (error) {
         if (!(error instanceof SandboxNotFoundError)) throw error;
       }
     }
-
     try {
-      return await Sandbox.#create(options, options.onCreate, options.onResume);
+      const sandbox = await Sandbox.create(options);
+      if (options.onCreate !== undefined) {
+        try {
+          await options.onCreate(sandbox);
+        } catch (error) {
+          await sandbox.delete().catch(() => undefined);
+          throw error;
+        }
+      }
+      return sandbox;
     } catch (error) {
       if (!(error instanceof SandboxAlreadyExistsError) || options.name === undefined) throw error;
-      const sandbox = await Sandbox.get({
+      return Sandbox.get({
         name: options.name,
-        resume: false,
+        ...(options.resume === undefined ? {} : { resume: options.resume }),
         ...(options.onResume === undefined ? {} : { onResume: options.onResume }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
-      if (options.resume ?? false) await sandbox.#ensureRunning();
-      return sandbox;
     }
-  }
-
-  static async #create(
-    options: SandboxCreateOptions,
-    onCreate?: (sandbox: Sandbox) => Promise<void>,
-    onResume?: (sandbox: Sandbox) => Promise<void>,
-  ): Promise<Sandbox> {
-    const normalized = normalizeCreateOptions(options);
-    await ensureDocker(normalized.signal);
-    await ensureImage(normalized.image, normalized.signal);
-    const createdAt = new Date();
-    const exposedPorts = Object.fromEntries(normalized.ports.map((port) => [`${port}/tcp`, {}]));
-    const portBindings = Object.fromEntries(
-      normalized.ports.map((port) => [`${port}/tcp`, [{ HostIp: "127.0.0.1", HostPort: "" }]]),
-    );
-
-    let container: Dockerode.Container;
-    try {
-      container = await docker.createContainer({
-        name: dockerContainerName(normalized.name),
-        Image: normalized.image,
-        Entrypoint: ["node"],
-        Cmd: ["--input-type=module", "-e", WATCHDOG, String(normalized.timeout)],
-        WorkingDir: "/vercel",
-        Env: Object.entries(normalized.env).map(([key, value]) => `${key}=${value}`),
-        Labels: {
-          [`${LABEL_PREFIX}.managed`]: "true",
-          [`${LABEL_PREFIX}.name`]: normalized.name,
-          [`${LABEL_PREFIX}.persistent`]: String(normalized.persistent),
-          [`${LABEL_PREFIX}.image`]: normalized.image,
-          [`${LABEL_PREFIX}.timeout`]: String(normalized.timeout),
-          [`${LABEL_PREFIX}.created`]: createdAt.toISOString(),
-          [`${LABEL_PREFIX}.ports`]: JSON.stringify(normalized.ports),
-          [`${LABEL_PREFIX}.tags`]: JSON.stringify(normalized.tags),
-          [`${LABEL_PREFIX}.failoverRegions`]: JSON.stringify(normalized.failoverRegions),
-          ...(normalized.runtime === undefined
-            ? {}
-            : { [`${LABEL_PREFIX}.runtime`]: normalized.runtime }),
-          ...(normalized.region === undefined
-            ? {}
-            : { [`${LABEL_PREFIX}.region`]: normalized.region }),
-        },
-        ExposedPorts: exposedPorts,
-        HostConfig: {
-          AutoRemove: !normalized.persistent,
-          NetworkMode: normalized.networkMode,
-          PortBindings: portBindings,
-          SecurityOpt: ["no-new-privileges"],
-          ...(normalized.vcpus === undefined
-            ? {}
-            : {
-                NanoCpus: normalized.vcpus * 1_000_000_000,
-                Memory: normalized.vcpus * 2_048 * 1_048_576,
-              }),
-        },
-        ...(normalized.signal === undefined ? {} : { abortSignal: normalized.signal }),
-      });
-    } catch (error) {
-      if (isConflict(error)) throw new SandboxAlreadyExistsError(normalized.name, error);
-      translateDockerError(error);
-    }
-
-    let sandbox: Sandbox | undefined;
-    try {
-      await container.start(normalized.signal === undefined ? undefined : { abortSignal: normalized.signal });
-      await Sandbox.#waitUntilReady(container, normalized.image, normalized.signal);
-      if (normalized.source !== undefined) {
-        await materializeSource(container, normalized.source, normalized.signal);
-      }
-      if (normalized.disconnectNetworkAfterSource) {
-        try {
-          await docker.getNetwork("bridge").disconnect({
-            Container: container.id,
-            Force: true,
-          });
-        } catch {
-          throw new UnsupportedSandboxCapabilityError("deny-all network isolation on this Docker daemon");
-        }
-      }
-      const info = await container.inspect();
-      sandbox = new Sandbox(
-        container,
-        metadataFromInspect(normalized.name, info),
-        info,
-        onResume,
-      );
-      await sandbox.#refreshRunningDetails(info);
-      if (onCreate !== undefined) await onCreate(sandbox);
-      return sandbox;
-    } catch (error) {
-      await container.remove({ force: true }).catch(() => undefined);
-      if (normalized.signal?.aborted) throw error;
-      if (error instanceof LocalboxError || sandbox !== undefined) throw error;
-      throw new UnsupportedImageError(normalized.image, error);
-    }
-  }
-
-  static async #waitUntilReady(
-    container: Dockerode.Container,
-    image: string,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    const deadline = Date.now() + 5_000;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      throwIfAborted(signal);
-      try {
-        const result = await rawExec(container, {
-          cmd: ["/bin/sh", "-c", "test -f /tmp/localbox/deadline && command -v node >/dev/null"],
-          ...(signal === undefined ? {} : { signal }),
-        });
-        if (result.exitCode === 0) return;
-      } catch (error) {
-        lastError = error;
-      }
-      await delay(25);
-    }
-    throw new UnsupportedImageError(image, lastError);
-  }
-
-  get status(): SandboxStatus {
-    return this.#status;
-  }
-
-  get expiresAt(): Date | undefined {
-    return this.#expiresAt === undefined ? undefined : new Date(this.#expiresAt);
   }
 
   async refresh(): Promise<SandboxStatus> {
-    if (this.#deleted) return this.#status;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let info: Dockerode.ContainerInspectInfo;
-      try {
-        info = await this.#container.inspect();
-      } catch (error) {
-        if (isNotFound(error)) {
-          if (!this.persistent && this.#status !== "running") {
-            this.#status = "stopped";
-            this.#expiresAt = undefined;
-            return this.#status;
-          }
-          throw new SandboxNotFoundError(this.name, error);
-        }
-        translateDockerError(error);
-      }
-      this.#status = mapStatus(info);
-      this.#portMap = portMapFromInspect(info, this.ports);
-      if (this.#status !== "running") {
-        this.#expiresAt = undefined;
-        return this.#status;
-      }
-      try {
-        await this.#refreshRunningDetails(info);
-        return this.#status;
-      } catch (error) {
-        if (dockerStatus(error) !== 409 || attempt === 1) throw error;
+    if (this.#deleted) return this.#record.status;
+    try {
+      const result = unwrap(await this.#client.getSandbox({
+        ...mutationMetadata(),
+        sandboxId: this.#record.sandboxId,
+        resume: false,
+      }));
+      this.#record = result.sandbox;
+    } catch (error) {
+      if (error instanceof SandboxNotFoundError && !this.persistent && this.status !== "running") {
+        this.#record = { ...this.#record, status: "stopped", expiresAt: null, endpoints: [] };
+      } else {
+        throw error;
       }
     }
-    return this.#status;
+    return this.#record.status;
   }
 
   domain(port: number): string {
-    if (!this.ports.includes(port)) throw new PortNotExposedError(this.name, port);
-    const hostPort = this.#portMap.get(port);
-    if (hostPort === undefined) throw new PortNotExposedError(this.name, port);
-    return `http://127.0.0.1:${hostPort}`;
+    const endpoint = this.#record.endpoints.find((candidate) => candidate.port === port);
+    if (endpoint === undefined) throw new PortNotExposedError(this.name, port);
+    return endpoint.url;
   }
 
   async extendTimeout(duration: number, options: SignalOptions = {}): Promise<void> {
     if (!Number.isFinite(duration) || !Number.isInteger(duration) || duration <= 0) {
       throw new InvalidSandboxOptionsError("Timeout extension must be a positive finite integer in milliseconds.");
     }
-    throwIfAborted(options.signal);
-    await this.#ensureRunning();
-    const extension = this.#extension.then(async () => {
-      const result = await rawExec(this.#container, {
-        cmd: ["node", "--input-type=module", "-e", EXTEND_DEADLINE, String(duration)],
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      });
-      if (result.exitCode !== 0) throw new Error(`Could not extend timeout for sandbox "${this.name}".`);
-      this.#expiresAt = new Date(Number(result.stdout.toString("utf8")));
-    });
-    this.#extension = extension.then(() => undefined, () => undefined);
-    await extension;
+    this.#assertUsable();
+    await this.#ensureRunning(options.signal);
+    const result = unwrap(await withAbort(this.#client.extendSandboxDeadline({
+      ...mutationMetadata(),
+      sandboxId: this.#record.sandboxId,
+      additionalMilliseconds: duration,
+    }), options.signal));
+    this.#record = result.sandbox;
   }
 
   runCommand(cmd: string, args?: string[], options?: SignalOptions): Promise<CommandFinished>;
@@ -943,6 +471,7 @@ export class Sandbox {
     args: string[] = [],
     stringOptions: SignalOptions = {},
   ): Promise<Command | CommandFinished> {
+    this.#assertUsable();
     const options: CommandRunOptions = typeof cmdOrOptions === "string"
       ? { cmd: cmdOrOptions, args, ...stringOptions }
       : cmdOrOptions;
@@ -951,91 +480,59 @@ export class Sandbox {
       throw new TypeError("Command name must be non-empty and cannot contain NUL bytes.");
     }
     const cwd = resolveContainerPath(options.cwd ?? WORKSPACE);
-    const container = await this.#ensureRunning();
-    const info = await container.inspect();
-    const environment = new Map<string, string>();
-    for (const entry of info.Config.Env ?? []) {
-      const separator = entry.indexOf("=");
-      if (separator >= 0) environment.set(entry.slice(0, separator), entry.slice(separator + 1));
-    }
-    for (const [key, value] of Object.entries(options.env ?? {})) environment.set(key, value);
-    const command = await startCommand(container, {
-      cmd: [options.cmd, ...(options.args ?? [])],
-      cwd,
-      env: [...environment].map(([key, value]) => `${key}=${value}`),
-      ...(options.stdout === undefined ? {} : { stdout: options.stdout }),
-      ...(options.stderr === undefined ? {} : { stderr: options.stderr }),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
+    const processId = randomUUID();
+    await this.#ensureRunning(options.signal);
+    const started = unwrap(await withAbort(this.#client.startCommand({
+      ...mutationMetadata(),
+      sandboxId: this.#record.sandboxId,
+      processId,
+      command: {
+        command: options.cmd,
+        arguments: [...(options.args ?? [])],
+        cwd,
+        environment: { ...options.env },
+      },
+      outputLimitBytes: 16 * 1024 * 1024,
+    }), options.signal));
+    const command = createCommand(
+      this.#client,
+      this.#record.sandboxId,
+      started.process,
+      options.stdout,
+      options.stderr,
+    );
     if (options.detached === true) return command;
     return command.wait(options.signal === undefined ? {} : { signal: options.signal });
   }
 
   async stop(options: SignalOptions = {}): Promise<void> {
-    this.#assertUsable();
     throwIfAborted(options.signal);
-    await this.#withLifecycle(async () => {
-      let info: Dockerode.ContainerInspectInfo;
-      try {
-        info = await this.#container.inspect();
-      } catch (error) {
-        if (isNotFound(error) && !this.persistent) {
-          this.#status = "stopped";
-          this.#expiresAt = undefined;
-          return;
-        }
-        if (isNotFound(error)) throw new SandboxNotFoundError(this.name, error);
-        translateDockerError(error);
-      }
-      if (!info.State.Running) {
-        this.#status = mapStatus(info);
-        this.#expiresAt = undefined;
-        return;
-      }
-      this.#status = "stopping";
-      try {
-        await this.#container.stop(options.signal === undefined ? undefined : { abortSignal: options.signal });
-      } catch (error) {
-        if (!isNotFound(error)) translateDockerError(error);
-      }
-      if (!this.persistent) {
-        const removalDeadline = Date.now() + 5_000;
-        while (Date.now() < removalDeadline) {
-          throwIfAborted(options.signal);
-          try {
-            await this.#container.inspect();
-          } catch (error) {
-            if (isNotFound(error)) break;
-            translateDockerError(error);
-          }
-          await delay(10);
-        }
-        try {
-          await this.#container.remove({ force: true });
-        } catch (error) {
-          if (!isNotFound(error)) translateDockerError(error);
-        }
-      }
-      this.#status = "stopped";
-      this.#expiresAt = undefined;
-    });
+    this.#assertUsable();
+    try {
+      const result = unwrap(await withAbort(this.#client.stopSandbox({
+        ...mutationMetadata(),
+        sandboxId: this.#record.sandboxId,
+      }), options.signal));
+      this.#record = result.sandbox;
+    } catch (error) {
+      if (!(error instanceof SandboxNotFoundError) || this.persistent) throw error;
+      this.#record = { ...this.#record, status: "stopped", expiresAt: null, endpoints: [] };
+    }
   }
 
   async delete(options: SignalOptions = {}): Promise<void> {
-    if (this.#deleted) return;
     throwIfAborted(options.signal);
-    await this.#withLifecycle(async () => {
-      if (this.#deleted) return;
-      try {
-        await this.#container.remove({ force: true });
-      } catch (error) {
-        if (!isNotFound(error)) translateDockerError(error);
-      }
-      this.#deleted = true;
-      this.#status = "stopped";
-      this.#expiresAt = undefined;
-      this.#portMap.clear();
-    });
+    if (this.#deleted) return;
+    try {
+      unwrap(await withAbort(this.#client.deleteSandbox({
+        ...mutationMetadata(),
+        sandboxId: this.#record.sandboxId,
+      }), options.signal));
+    } catch (error) {
+      if (!(error instanceof SandboxNotFoundError)) throw error;
+    }
+    this.#deleted = true;
+    this.#record = { ...this.#record, status: "stopped", expiresAt: null, endpoints: [] };
   }
 
   async mkDir(path: string, options: SignalOptions = {}): Promise<void> {
@@ -1048,104 +545,33 @@ export class Sandbox {
   async writeFiles(files: WriteFileSpec[], options: SignalOptions = {}): Promise<void> {
     for (const file of files) {
       const operationOptions = options.signal === undefined ? {} : { signal: options.signal };
-      await this.fs.writeFile(file.path, file.content, operationOptions);
-      if (file.mode !== undefined) await this.fs.chmod(file.path, file.mode, operationOptions);
+      await this.fs.writeFile(file.path, file.content, {
+        ...operationOptions,
+        ...(file.mode === undefined ? {} : { mode: file.mode }),
+      });
     }
   }
 
-  async readFile(
-    src: SandboxPath,
-    options: SignalOptions = {},
-  ): Promise<NodeJS.ReadableStream | null> {
+  async readFile(src: SandboxPath, options: SignalOptions = {}): Promise<NodeJS.ReadableStream | null> {
     throwIfAborted(options.signal);
     const path = resolveContainerPath(src.path, src.cwd);
-    if (!(await this.fs.exists(path, options.signal === undefined ? {} : { signal: options.signal }))) {
-      return null;
-    }
-    const container = await this.#ensureRunning();
-    const exec = await container.exec({
-      AttachStdin: false,
-      AttachStdout: true,
-      AttachStderr: true,
-      Tty: false,
-      Cmd: [
-        "node",
-        "--input-type=module",
-        "-e",
-        'import { createReadStream } from "node:fs"; createReadStream(process.argv[1]).pipe(process.stdout);',
+    try {
+      const contents = await this.fs.readFile(
         path,
-      ],
-      WorkingDir: WORKSPACE,
-      ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
-    });
-    const stream = await exec.start({
-      Detach: false,
-      Tty: false,
-      hijack: true,
-      stdin: false,
-      ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
-    });
-    const output = new PassThrough();
-    const stderr: Buffer[] = [];
-    const errorSink = new Writable({
-      write(chunk: Buffer, _encoding, callback) {
-        stderr.push(Buffer.from(chunk));
-        callback();
-      },
-    });
-    docker.modem.demuxStream(stream, output, errorSink);
-
-    let settled = false;
-    const cleanup = (): void => {
-      options.signal?.removeEventListener("abort", abort);
-      stream.off("end", finish);
-      stream.off("close", finish);
-      stream.off("error", fail);
-    };
-    const abort = (): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      const error = abortError();
-      stream.destroy(error);
-      output.destroy(error);
-    };
-    const fail = (error: Error): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      output.destroy(error);
-    };
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      void exec.inspect().then((info) => {
-        if ((info.ExitCode ?? 0) === 0) {
-          output.end();
-          return;
-        }
-        const message = Buffer.concat(stderr).toString("utf8").trim();
-        output.destroy(new Error(message.length > 0 ? message : `Could not read \"${path}\".`));
-      }, (error: unknown) => {
-        output.destroy(error instanceof Error ? error : new Error(String(error)));
-      });
-    };
-    options.signal?.addEventListener("abort", abort, { once: true });
-    stream.once("end", finish);
-    stream.once("close", finish);
-    stream.once("error", fail);
-    return output;
+        options.signal === undefined ? null : { encoding: null, signal: options.signal },
+      );
+      return Readable.from(contents);
+    } catch (error) {
+      if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
   }
 
-  async readFileToBuffer(
-    src: SandboxPath,
-    options: SignalOptions = {},
-  ): Promise<Buffer | null> {
+  async readFileToBuffer(src: SandboxPath, options: SignalOptions = {}): Promise<Buffer | null> {
     try {
       return await this.fs.readFile(
         resolveContainerPath(src.path, src.cwd),
-        options.signal === undefined ? {} : { signal: options.signal },
+        options.signal === undefined ? null : { encoding: null, signal: options.signal },
       );
     } catch (error) {
       if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -1159,87 +585,57 @@ export class Sandbox {
     options: DownloadOptions = {},
   ): Promise<string | null> {
     throwIfAborted(options.signal);
-    let contents: Buffer;
-    try {
-      contents = await this.fs.readFile(
-        resolveContainerPath(src.path, src.cwd),
-        options.signal === undefined ? {} : { signal: options.signal },
-      );
-    } catch (error) {
-      if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
+    const contents = await this.readFileToBuffer(src, options);
+    if (contents === null) return null;
     const destination = resolveLocalPath(dst.cwd ?? process.cwd(), dst.path);
     if (options.mkdirRecursive ?? false) await localFs.mkdir(dirname(destination), { recursive: true });
-    await localFs.writeFile(destination, contents, options.signal === undefined ? undefined : { signal: options.signal });
+    await localFs.writeFile(
+      destination,
+      contents,
+      options.signal === undefined ? undefined : { signal: options.signal },
+    );
     return destination;
+  }
+
+  async #ensureRunning(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    this.#assertUsable();
+    if (this.#resumePromise !== undefined) {
+      if (this.#record.status === "running") return;
+      return this.#resumePromise;
+    }
+    const resume = (async () => {
+      const observed = unwrap(await withAbort(this.#client.getSandbox({
+        ...mutationMetadata(),
+        sandboxId: this.#record.sandboxId,
+        resume: false,
+      }), signal));
+      this.#record = observed.sandbox;
+      if (observed.sandbox.status === "running") return;
+      const resumed = unwrap(await withAbort(this.#client.getSandbox({
+        ...mutationMetadata(),
+        sandboxId: this.#record.sandboxId,
+        resume: true,
+      }), signal));
+      this.#record = resumed.sandbox;
+      if (this.#onResume !== undefined) {
+        try {
+          await this.#onResume(this);
+        } catch (error) {
+          await this.stop().catch(() => undefined);
+          throw error;
+        }
+      }
+    })();
+    this.#resumePromise = resume;
+    try {
+      await resume;
+    } finally {
+      if (this.#resumePromise === resume) this.#resumePromise = undefined;
+    }
   }
 
   #assertUsable(): void {
     if (this.#deleted) throw new SandboxDeletedError(this.name);
-  }
-
-  #withLifecycle<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.#lifecycle.then(operation, operation);
-    this.#lifecycle = run.then(() => undefined, () => undefined);
-    return run;
-  }
-
-  async #ensureRunning(): Promise<Dockerode.Container> {
-    this.#assertUsable();
-    if (resumeContext.getStore() === this && this.#status === "running") return this.#container;
-    if (this.#resumePromise !== undefined) return this.#resumePromise;
-
-    const resume = this.#withLifecycle(async () => {
-      this.#assertUsable();
-      let info: Dockerode.ContainerInspectInfo;
-      try {
-        info = await this.#container.inspect();
-      } catch (error) {
-        if (isNotFound(error)) throw new SandboxNotFoundError(this.name, error);
-        translateDockerError(error);
-      }
-      this.#status = mapStatus(info);
-      if (info.State.Running) {
-        await this.#refreshRunningDetails(info);
-        return this.#container;
-      }
-      if (!this.persistent) throw new SandboxNotFoundError(this.name);
-
-      this.#status = "pending";
-      try {
-        await this.#container.start();
-      } catch (error) {
-        if (dockerStatus(error) !== 304) translateDockerError(error);
-      }
-      await Sandbox.#waitUntilReady(this.#container, this.image);
-      info = await this.#container.inspect();
-      this.#status = "running";
-      await this.#refreshRunningDetails(info);
-      if (this.#onResume !== undefined) {
-        try {
-          await resumeContext.run(this, async () => this.#onResume?.(this));
-        } catch (error) {
-          await this.#container.stop().catch(() => undefined);
-          this.#status = "stopped";
-          this.#expiresAt = undefined;
-          throw error;
-        }
-      }
-      return this.#container;
-    });
-    this.#resumePromise = resume;
-    void resume.finally(() => {
-      if (this.#resumePromise === resume) this.#resumePromise = undefined;
-    }).catch(() => undefined);
-    return resume;
-  }
-
-  async #refreshRunningDetails(info: Dockerode.ContainerInspectInfo): Promise<void> {
-    this.#portMap = portMapFromInspect(info, this.ports);
-    const deadline = await rawExec(this.#container, {
-      cmd: ["node", "-e", 'process.stdout.write(require("node:fs").readFileSync("/tmp/localbox/deadline", "utf8"))'],
-    });
-    if (deadline.exitCode === 0) this.#expiresAt = new Date(Number(deadline.stdout.toString("utf8")));
   }
 }

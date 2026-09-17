@@ -146,6 +146,8 @@ export type SandboxRecord = JsonObject & {
   readonly status: SandboxStatus;
   readonly persistent: boolean;
   readonly bootSource: SandboxBootSource;
+  /** Provider runtime selector when one was used to resolve the concrete image. */
+  readonly runtime: string | null;
   readonly backend: BackendReference;
   readonly createdAt: TimestampMilliseconds;
   readonly updatedAt: TimestampMilliseconds;
@@ -154,6 +156,8 @@ export type SandboxRecord = JsonObject & {
   readonly timeoutMs: number;
   readonly tags: Readonly<Record<string, string>>;
   readonly ports: readonly number[];
+  /** Currently resolved endpoints, used by synchronous compatibility frontends. */
+  readonly endpoints: readonly EndpointRecord[];
   readonly resources: SandboxResources;
   readonly region: string | null;
   readonly failoverRegions: readonly string[];
@@ -468,3 +472,9 @@ export interface SandboxBackend extends SandboxClient {
 }
 
 export { EmbeddedSandboxClient } from "./embedded.js";
+export {
+  DockerBackend,
+  MANAGED_IMAGES,
+  MANAGED_IMAGE_REGISTRY,
+  MANAGED_IMAGE_UPSTREAM_COMMIT,
+} from "../backends/docker/index.js";
