@@ -1,15 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import * as localFs from "node:fs/promises";
-import { dirname, resolve as resolveLocalPath } from "node:path";
 import { posix } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { PassThrough, Writable } from "node:stream";
 import type Dockerode from "dockerode";
 import type { RawCommand } from "../../runtime/index.js";
 import { startRawCommand, type StartRawCommandOptions } from "./command.js";
 import {
-  abortError,
   dockerStatus,
   ensureDocker,
   ensureImage,
@@ -30,7 +26,6 @@ import {
   UnsupportedImageError,
   UnsupportedSandboxCapabilityError,
 } from "./errors.js";
-import { createFileSystem, FileSystem } from "./filesystem.js";
 import { resolveSandboxImage } from "./managed-images.js";
 import type {
   SandboxCreateOptions,
@@ -40,10 +35,8 @@ import type {
   SandboxListOptions,
   SandboxListPage,
   SandboxListResult,
-  SandboxPath,
   SandboxSource,
   SandboxStatus,
-  WriteFileSpec,
 } from "./types.js";
 
 const DEFAULT_TIMEOUT = 300_000;
@@ -171,9 +164,6 @@ interface SignalOptions {
   signal?: AbortSignal;
 }
 
-interface DownloadOptions extends SignalOptions {
-  mkdirRecursive?: boolean;
-}
 
 interface DockerPortBinding {
   HostIp?: string;
@@ -638,7 +628,6 @@ export class Sandbox {
   readonly vcpus: number | undefined;
   readonly memory: number | undefined;
   readonly createdAt: Date;
-  readonly fs: FileSystem;
   readonly #docker: Dockerode;
   readonly #container: Dockerode.Container;
   readonly #onResume: ((sandbox: Sandbox) => Promise<void>) | undefined;
@@ -674,7 +663,6 @@ export class Sandbox {
     this.#status = mapStatus(info);
     this.#portMap = portMapFromInspect(info, this.ports);
     this.#onResume = onResume;
-    this.fs = createFileSystem(docker, async () => this.#ensureRunning());
   }
 
   static async list(docker: Dockerode, options: SandboxListOptions = {}): Promise<SandboxListResult> {
@@ -976,6 +964,7 @@ export class Sandbox {
       cwd,
       env: [...environment].map(([key, value]) => `${key}=${value}`),
       ...(options.user === undefined ? {} : { user: options.user }),
+      ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
   }
@@ -1047,142 +1036,6 @@ export class Sandbox {
     });
   }
 
-  async mkDir(path: string, options: SignalOptions = {}): Promise<void> {
-    await this.fs.mkdir(path, {
-      recursive: true,
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
-  }
-
-  async writeFiles(files: WriteFileSpec[], options: SignalOptions = {}): Promise<void> {
-    for (const file of files) {
-      const operationOptions = options.signal === undefined ? {} : { signal: options.signal };
-      await this.fs.writeFile(file.path, file.content, operationOptions);
-      if (file.mode !== undefined) await this.fs.chmod(file.path, file.mode, operationOptions);
-    }
-  }
-
-  async readFile(
-    src: SandboxPath,
-    options: SignalOptions = {},
-  ): Promise<NodeJS.ReadableStream | null> {
-    throwIfAborted(options.signal);
-    const path = resolveContainerPath(src.path, src.cwd);
-    if (!(await this.fs.exists(path, options.signal === undefined ? {} : { signal: options.signal }))) {
-      return null;
-    }
-    const container = await this.#ensureRunning();
-    const exec = await container.exec({
-      AttachStdin: false,
-      AttachStdout: true,
-      AttachStderr: true,
-      Tty: false,
-      Cmd: [
-        "node",
-        "--input-type=module",
-        "-e",
-        'import { createReadStream } from "node:fs"; createReadStream(process.argv[1]).pipe(process.stdout);',
-        path,
-      ],
-      WorkingDir: WORKSPACE,
-      ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
-    });
-    const stream = await exec.start({
-      Detach: false,
-      Tty: false,
-      hijack: true,
-      stdin: false,
-      ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
-    });
-    const output = new PassThrough();
-    const stderr: Buffer[] = [];
-    const errorSink = new Writable({
-      write(chunk: Buffer, _encoding, callback) {
-        stderr.push(Buffer.from(chunk));
-        callback();
-      },
-    });
-    this.#docker.modem.demuxStream(stream, output, errorSink);
-
-    let settled = false;
-    const cleanup = (): void => {
-      options.signal?.removeEventListener("abort", abort);
-      stream.off("end", finish);
-      stream.off("close", finish);
-      stream.off("error", fail);
-    };
-    const abort = (): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      const error = abortError();
-      stream.destroy(error);
-      output.destroy(error);
-    };
-    const fail = (error: Error): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      output.destroy(error);
-    };
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      void exec.inspect().then((info) => {
-        if ((info.ExitCode ?? 0) === 0) {
-          output.end();
-          return;
-        }
-        const message = Buffer.concat(stderr).toString("utf8").trim();
-        output.destroy(new Error(message.length > 0 ? message : `Could not read \"${path}\".`));
-      }, (error: unknown) => {
-        output.destroy(error instanceof Error ? error : new Error(String(error)));
-      });
-    };
-    options.signal?.addEventListener("abort", abort, { once: true });
-    stream.once("end", finish);
-    stream.once("close", finish);
-    stream.once("error", fail);
-    return output;
-  }
-
-  async readFileToBuffer(
-    src: SandboxPath,
-    options: SignalOptions = {},
-  ): Promise<Buffer | null> {
-    try {
-      return await this.fs.readFile(
-        resolveContainerPath(src.path, src.cwd),
-        options.signal === undefined ? {} : { signal: options.signal },
-      );
-    } catch (error) {
-      if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
-  }
-
-  async downloadFile(
-    src: SandboxPath,
-    dst: SandboxPath,
-    options: DownloadOptions = {},
-  ): Promise<string | null> {
-    throwIfAborted(options.signal);
-    let contents: Buffer;
-    try {
-      contents = await this.fs.readFile(
-        resolveContainerPath(src.path, src.cwd),
-        options.signal === undefined ? {} : { signal: options.signal },
-      );
-    } catch (error) {
-      if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
-    const destination = resolveLocalPath(dst.cwd ?? process.cwd(), dst.path);
-    if (options.mkdirRecursive ?? false) await localFs.mkdir(dirname(destination), { recursive: true });
-    await localFs.writeFile(destination, contents, options.signal === undefined ? undefined : { signal: options.signal });
-    return destination;
-  }
 
   #assertUsable(): void {
     if (this.#deleted) throw new SandboxDeletedError(this.name);

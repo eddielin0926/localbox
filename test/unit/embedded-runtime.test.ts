@@ -3,14 +3,11 @@ import { EmbeddedSandboxClient } from "../../src/runtime/index.js";
 import type {
   BackendReference,
   ClientFailure,
-  ClientResult,
   CreateSandboxRequest,
   RequestMetadata,
   SandboxBackend,
   SandboxCapability,
   SandboxRecord,
-  WriteFileRequest,
-  WriteFileResult,
 } from "../../src/runtime/index.js";
 
 const ALL_CAPABILITIES = [
@@ -49,11 +46,12 @@ function unavailable(
 function createBackend(
   reference: BackendReference,
   capabilities: readonly SandboxCapability[] = ALL_CAPABILITIES,
-  overrides: Partial<Omit<SandboxBackend, "reference" | "capabilities">> = {},
+  overrides: Partial<Omit<SandboxBackend, "reference" | "capabilities" | "rawCommandCapabilities">> = {},
 ): SandboxBackend {
   return {
     reference,
     capabilities,
+    rawCommandCapabilities: ["input", "managed-filesystem-owner"],
     createSandbox: (request) => unavailable(request, "createSandbox"),
     getSandbox: (request) => unavailable(request, "getSandbox"),
     listSandboxes: (request) => unavailable(request, "listSandboxes"),
@@ -61,9 +59,6 @@ function createBackend(
     deleteSandbox: (request) => unavailable(request, "deleteSandbox"),
     extendSandboxDeadline: (request) => unavailable(request, "extendSandboxDeadline"),
     startRawCommand: (request) => unavailable(request, "startRawCommand"),
-    readFile: (request) => unavailable(request, "readFile"),
-    writeFile: (request) => unavailable(request, "writeFile"),
-    makeDirectory: (request) => unavailable(request, "makeDirectory"),
     getEndpoint: (request) => unavailable(request, "getEndpoint"),
     ...overrides,
   };
@@ -177,17 +172,6 @@ function listRequest(requestId: string) {
   } as const;
 }
 
-function writeRequest(requestId: string, path: string): WriteFileRequest {
-  return {
-    requestId,
-    idempotencyKey: `write:${path}`,
-    deadline: { expiresAt: 1_800_000_123_456 },
-    sandboxId: "sandbox-1",
-    path,
-    content: { encoding: "utf8", data: "payload" },
-    mode: 0o600,
-  };
-}
 
 describe("EmbeddedSandboxClient", () => {
   test("keeps coexisting backend instances isolated", async () => {
@@ -282,121 +266,4 @@ describe("EmbeddedSandboxClient", () => {
     expect(createCalls).toBe(0);
   });
 
-  test("passes mutation identity and deadline data to the selected backend unchanged", async () => {
-    const reference = { backendId: "metadata", backendType: "test" } as const;
-    let received: WriteFileRequest | undefined;
-    const client = new EmbeddedSandboxClient(
-      createBackend(reference, ALL_CAPABILITIES, {
-        async writeFile(request) {
-          received = request;
-          return {
-            ok: true,
-            value: { path: request.path, bytesWritten: 7 },
-          } satisfies ClientResult<WriteFileResult>;
-        },
-      }),
-    );
-    const request = Object.freeze({
-      ...writeRequest("write-request", "/workspace/value.txt"),
-      deadline: Object.freeze({ expiresAt: 1_800_000_123_456 }),
-    });
-
-    const result = await client.writeFile(request);
-
-    expect(result).toEqual({
-      ok: true,
-      value: { path: "/workspace/value.txt", bytesWritten: 7 },
-    });
-    expect(received).toBe(request);
-    expect(received?.requestId).toBe("write-request");
-    expect(received?.idempotencyKey).toBe("write:/workspace/value.txt");
-    expect(received?.deadline).toBe(request.deadline);
-  });
-
-  test("preserves valid failures and normalizes thrown or non-JSON backend failures", async () => {
-    const reference = { backendId: "errors", backendType: "test" } as const;
-    const client = new EmbeddedSandboxClient(
-      createBackend(reference, ALL_CAPABILITIES, {
-        async writeFile(request) {
-          if (request.path === "/throw") {
-            const failure = new Error("backend secret");
-            Object.assign(failure, { handle: new Map([["private", true]]) });
-            throw failure;
-          }
-          if (request.path === "/invalid") {
-            return {
-              ok: false,
-              error: {
-                category: "backend-failure",
-                code: "UNSAFE",
-                message: "unsafe",
-                retryable: false,
-                requestId: request.requestId,
-                backend: reference,
-                details: new Error("nested secret"),
-              },
-            } as unknown as ClientResult<WriteFileResult>;
-          }
-          return {
-            ok: false,
-            error: {
-              category: "not-found",
-              code: "TEST_FILE_NOT_FOUND",
-              message: "The requested file does not exist.",
-              retryable: false,
-              requestId: request.requestId,
-              backend: reference,
-              details: {
-                type: "resource",
-                resource: "sandbox",
-                resourceId: request.sandboxId,
-                path: request.path,
-              },
-            },
-          } satisfies ClientFailure;
-        },
-      }),
-    );
-
-    const thrown = await client.writeFile(writeRequest("thrown", "/throw"));
-    const invalid = await client.writeFile(writeRequest("invalid", "/invalid"));
-    const valid = await client.writeFile(writeRequest("valid", "/missing"));
-
-    for (const [requestId, failure] of [
-      ["thrown", thrown],
-      ["invalid", invalid],
-    ] as const) {
-      expect(failure).toEqual({
-        ok: false,
-        error: {
-          category: "backend-failure",
-          code: "LOCALBOX_BACKEND_FAILURE",
-          message: "The backend failed to complete the operation.",
-          retryable: false,
-          requestId,
-          backend: reference,
-          details: { type: "backend", operation: "writeFile" },
-        },
-      });
-      expect(JSON.stringify(failure)).not.toContain("secret");
-      expect(JSON.parse(JSON.stringify(failure))).toEqual(failure);
-    }
-    expect(valid).toEqual({
-      ok: false,
-      error: {
-        category: "not-found",
-        code: "TEST_FILE_NOT_FOUND",
-        message: "The requested file does not exist.",
-        retryable: false,
-        requestId: "valid",
-        backend: reference,
-        details: {
-          type: "resource",
-          resource: "sandbox",
-          resourceId: "sandbox-1",
-          path: "/missing",
-        },
-      },
-    });
-  });
 });

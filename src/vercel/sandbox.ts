@@ -235,7 +235,6 @@ export class Sandbox {
     this.fs = createFileSystem(
       client,
       record.sandboxId,
-      record.bootSource.type === "image" ? record.bootSource.image : "",
       async (signal) => this.#ensureRunning(signal),
     );
   }

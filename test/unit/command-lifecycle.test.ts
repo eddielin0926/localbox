@@ -86,6 +86,7 @@ function backend(raw: ControlledRawCommand): SandboxBackend {
   return {
     reference: REFERENCE,
     capabilities: ["command.start", "command.detached"],
+    rawCommandCapabilities: [],
     createSandbox: (request) => Promise.resolve(unavailable(request.requestId, "createSandbox")),
     getSandbox: (request) => Promise.resolve(unavailable(request.requestId, "getSandbox")),
     listSandboxes: (request) => Promise.resolve(unavailable(request.requestId, "listSandboxes")),
@@ -98,9 +99,6 @@ function backend(raw: ControlledRawCommand): SandboxBackend {
       unavailable(request.requestId, "extendSandboxDeadline"),
     ),
     startRawCommand: () => Promise.resolve({ ok: true, command: raw }),
-    readFile: (request) => Promise.resolve(unavailable(request.requestId, "readFile")),
-    writeFile: (request) => Promise.resolve(unavailable(request.requestId, "writeFile")),
-    makeDirectory: (request) => Promise.resolve(unavailable(request.requestId, "makeDirectory")),
     getEndpoint: (request) => Promise.resolve(unavailable(request.requestId, "getEndpoint")),
   };
 }

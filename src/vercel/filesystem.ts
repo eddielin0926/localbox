@@ -1,7 +1,10 @@
 import type { Dirent, Stats } from "node:fs";
 import { posix } from "node:path";
-import type { SandboxClient } from "../runtime/index.js";
-import { createCommand } from "./command.js";
+import type {
+  FilesystemOperation,
+  JsonObject,
+  SandboxClient,
+} from "../runtime/index.js";
 import {
   mutationMetadata,
   requestMetadata,
@@ -9,92 +12,8 @@ import {
   unwrap,
   withAbort,
 } from "./client.js";
-import { UnsupportedSandboxCapabilityError } from "./errors.js";
-import {
-  managedFilesystemPrivilegeBridge,
-  type ManagedFilesystemPrivilegeBridge,
-} from "./managed-filesystem-bridge.js";
 
 const WORKSPACE = "/vercel/sandbox";
-const ERROR_PREFIX = "LOCALBOX_ERROR:";
-
-const FILESYSTEM_BRIDGE = String.raw`
-import * as fs from "node:fs/promises";
-const op = process.argv[1];
-const args = JSON.parse(process.argv[2]);
-const input = () => Buffer.from(args.stdin ?? "", "base64");
-const json = (value) => process.stdout.write(JSON.stringify(value ?? null));
-const stats = (value) => ({
-  dev: value.dev,
-  ino: value.ino,
-  mode: value.mode,
-  nlink: value.nlink,
-  uid: value.uid,
-  gid: value.gid,
-  rdev: value.rdev,
-  size: value.size,
-  blksize: value.blksize,
-  blocks: value.blocks,
-  atimeMs: value.atimeMs,
-  mtimeMs: value.mtimeMs,
-  ctimeMs: value.ctimeMs,
-  birthtimeMs: value.birthtimeMs,
-  type: value.isFile() ? "file"
-    : value.isDirectory() ? "directory"
-    : value.isBlockDevice() ? "block"
-    : value.isCharacterDevice() ? "character"
-    : value.isSymbolicLink() ? "symlink"
-    : value.isFIFO() ? "fifo"
-    : value.isSocket() ? "socket"
-    : "unknown",
-});
-const dirent = (value, parentPath) => ({
-  name: value.name,
-  parentPath,
-  type: value.isFile() ? "file"
-    : value.isDirectory() ? "directory"
-    : value.isBlockDevice() ? "block"
-    : value.isCharacterDevice() ? "character"
-    : value.isSymbolicLink() ? "symlink"
-    : value.isFIFO() ? "fifo"
-    : value.isSocket() ? "socket"
-    : "unknown",
-});
-try {
-  switch (op) {
-    case "appendFile": await fs.appendFile(args.path, input(), args.options); break;
-    case "readdir": {
-      const entries = await fs.readdir(args.path, { withFileTypes: args.withFileTypes });
-      json(args.withFileTypes ? entries.map((entry) => dirent(entry, args.path)) : entries);
-      break;
-    }
-    case "stat": json(stats(await fs.stat(args.path))); break;
-    case "lstat": json(stats(await fs.lstat(args.path))); break;
-    case "unlink": await fs.unlink(args.path); break;
-    case "rm": await fs.rm(args.path, args.options); break;
-    case "rmdir": await fs.rmdir(args.path); break;
-    case "rename": await fs.rename(args.oldPath, args.newPath); break;
-    case "copyFile": await fs.copyFile(args.src, args.dest); break;
-    case "chmod": await fs.chmod(args.path, args.mode); break;
-    case "chown": await fs.chown(args.path, args.uid, args.gid); break;
-    case "symlink": await fs.symlink(args.target, args.path); break;
-    case "readlink": json(await fs.readlink(args.path)); break;
-    case "realpath": json(await fs.realpath(args.path)); break;
-    case "truncate": await fs.truncate(args.path, args.len); break;
-    case "mkdtemp": json(await fs.mkdtemp(args.prefix)); break;
-    case "access": await fs.access(args.path); break;
-    default: throw new Error("Unknown filesystem operation");
-  }
-} catch (error) {
-  process.stderr.write(${JSON.stringify(ERROR_PREFIX)} + JSON.stringify({
-    message: error instanceof Error ? error.message : String(error),
-    code: error?.code,
-    syscall: error?.syscall,
-    path: error?.path,
-  }));
-  process.exitCode = 1;
-}
-`;
 
 interface NodeFileError extends Error {
   code?: string;
@@ -139,7 +58,6 @@ type SerializedFileType =
 interface FileSystemState {
   readonly client: SandboxClient;
   readonly sandboxId: string;
-  readonly privilegeBridge: ManagedFilesystemPrivilegeBridge | null;
   readonly ensureRunning: (signal?: AbortSignal) => Promise<void>;
 }
 
@@ -187,29 +105,6 @@ export function resolveSandboxPath(path: string): string {
   return posix.isAbsolute(path) ? path : posix.resolve(WORKSPACE, path);
 }
 
-function fileError(stderr: Buffer): NodeFileError {
-  const text = stderr.toString("utf8");
-  const marker = text.indexOf(ERROR_PREFIX);
-  if (marker === -1) {
-    const detail = text.trim();
-    return new Error(
-      detail.length === 0
-        ? "The filesystem operation failed inside the sandbox."
-        : `The filesystem operation failed inside the sandbox: ${detail}`,
-    );
-  }
-  const payload = JSON.parse(text.slice(marker + ERROR_PREFIX.length)) as {
-    message: string;
-    code?: string;
-    syscall?: string;
-    path?: string;
-  };
-  const error = new Error(payload.message) as NodeFileError;
-  if (payload.code !== undefined) error.code = payload.code;
-  if (payload.syscall !== undefined) error.syscall = payload.syscall;
-  if (payload.path !== undefined) error.path = payload.path;
-  return error;
-}
 
 function assertEncoding(encoding: string): asserts encoding is BufferEncoding {
   if (!Buffer.isEncoding(encoding)) throw new TypeError(`Unsupported encoding "${encoding}".`);
@@ -319,7 +214,7 @@ export class FileSystem {
       "appendFile",
       {
         path: resolveSandboxPath(path),
-        options: normalized.mode === undefined ? {} : { mode: normalized.mode },
+        mode: normalized.mode ?? null,
       },
       contents,
       normalized.signal,
@@ -372,7 +267,11 @@ export class FileSystem {
   async rm(path: string, options: FileRemoveOptions = {}): Promise<void> {
     await this.#run(
       "rm",
-      { path: resolveSandboxPath(path), options: { recursive: options.recursive ?? false, force: options.force ?? false } },
+      {
+        path: resolveSandboxPath(path),
+        recursive: options.recursive ?? false,
+        force: options.force ?? false,
+      },
       undefined,
       options.signal,
     );
@@ -424,18 +323,11 @@ export class FileSystem {
     gid: number,
     options: FileOperationOptions = {},
   ): Promise<void> {
-    const privilegeBridge = this.#state.privilegeBridge;
-    if (privilegeBridge === null) {
-      throw new UnsupportedSandboxCapabilityError(
-        "privileged filesystem operations for custom images",
-      );
-    }
     await this.#run(
       "chown",
       { path: resolveSandboxPath(path), uid, gid },
       undefined,
       options.signal,
-      privilegeBridge,
     );
   }
 
@@ -473,41 +365,26 @@ export class FileSystem {
   }
 
   async #run(
-    operation: string,
-    args: Record<string, unknown>,
-    stdin?: Buffer,
+    operation: FilesystemOperation,
+    arguments_: JsonObject,
+    input?: Buffer,
     signal?: AbortSignal,
-    privilegeBridge?: ManagedFilesystemPrivilegeBridge,
   ): Promise<Buffer> {
     await this.#state.ensureRunning(signal);
     throwIfAborted(signal);
-    const nodeArguments = [
-      "--input-type=module",
-      "-e",
-      FILESYSTEM_BRIDGE,
-      operation,
-      JSON.stringify({
-        ...args,
-        ...(stdin === undefined ? {} : { stdin: stdin.toString("base64") }),
-      }),
-    ];
-    const started = unwrap(await withAbort(this.#state.client.startCommand({
+    const result = unwrap(await withAbort(this.#state.client.runFilesystemOperation({
       ...mutationMetadata(),
       sandboxId: this.#state.sandboxId,
-      command: {
-        command: privilegeBridge?.nodePath ?? "node",
-        arguments: nodeArguments,
-        cwd: WORKSPACE,
-        environment: {},
-        ...(privilegeBridge === undefined ? {} : { user: "0" }),
-      },
-      outputLimitBytes: 16 * 1024 * 1024,
+      operation,
+      arguments: arguments_,
+      content: input === undefined
+        ? null
+        : { encoding: "base64", data: input.toString("base64") },
     }), signal));
-    const command = createCommand(this.#state.client, this.#state.sandboxId, started.process);
-    const finished = await command.wait(signal === undefined ? {} : { signal });
-    const stdout = Buffer.from(await finished.stdout());
-    if (finished.exitCode !== 0) throw fileError(Buffer.from(await finished.stderr()));
-    return stdout;
+    if (result.value === null) return Buffer.alloc(0);
+    const encoded = JSON.stringify(result.value);
+    if (encoded === undefined) throw new TypeError("Filesystem result is not JSON-compatible.");
+    return Buffer.from(encoded);
   }
 }
 
@@ -515,13 +392,11 @@ export class FileSystem {
 export function createFileSystem(
   client: SandboxClient,
   sandboxId: string,
-  image: string,
   ensureRunning: (signal?: AbortSignal) => Promise<void>,
 ): FileSystem {
   return new FileSystem({
     client,
     sandboxId,
-    privilegeBridge: managedFilesystemPrivilegeBridge(image),
     ensureRunning,
   } as never);
 }

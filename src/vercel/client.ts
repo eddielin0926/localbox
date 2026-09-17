@@ -94,9 +94,13 @@ function translatedClientError(error: SandboxError): Error {
     case "LOCALBOX_DEADLINE_EXCEEDED":
       return abortError();
     default: {
-      const translated = new LocalboxError(error.message);
-      if (error.code === "LOCALBOX_FILE_NOT_FOUND") {
-        (translated as NodeJS.ErrnoException).code = "ENOENT";
+      const translated = new LocalboxError(error.message) as NodeJS.ErrnoException;
+      if (error.details.type === "file") {
+        if (error.details.code !== null) translated.code = error.details.code;
+        if (error.details.syscall !== null) translated.syscall = error.details.syscall;
+        if (error.details.path !== null) translated.path = error.details.path;
+      } else if (error.code === "LOCALBOX_FILE_NOT_FOUND") {
+        translated.code = "ENOENT";
       }
       return translated;
     }
