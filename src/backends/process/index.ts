@@ -1085,7 +1085,7 @@ export class ProcessBackend implements SandboxBackend {
 }
 
 async function ensureDirectoryPath(target: string): Promise<void> {
-  let current = sep;
+  let current: string = sep;
   for (const segment of resolve(target).split(sep).filter((part) => part.length > 0)) {
     current = join(current, segment);
     try {

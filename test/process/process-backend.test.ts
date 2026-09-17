@@ -20,6 +20,7 @@ import type {
   JsonObject,
   RawCommand,
   RawCommandEvent,
+  ReadCommandOutputResult,
   SandboxClient,
   SandboxSpec,
 } from "../../src/runtime/index.js";
@@ -108,7 +109,7 @@ async function readCommandText(client: SandboxClient, sandboxId: string, process
   let complete = false;
   let text = "";
   while (!complete) {
-    const page = unwrap(await client.readCommandOutput({
+    const page: ReadCommandOutputResult = unwrap(await client.readCommandOutput({
       requestId: `process-test:output:${randomUUID()}`,
       deadline: { expiresAt: Date.now() + 10_000 },
       sandboxId,
