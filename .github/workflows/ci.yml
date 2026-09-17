@@ -91,20 +91,14 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Ubuntu hosted runners may restrict unprivileged user namespaces through
-    # their outer AppArmor profile. The privileged job container supplies the
-    # namespace prerequisite; every Localbox test still runs as an ordinary
-    # uid with the backend's unprivileged user-namespace strategy.
-    container:
-      image: ubuntu:24.04
-      options: --privileged
+    # The distro package installs Ubuntu's bubblewrap AppArmor policy. Tests
+    # run as the ordinary hosted-runner uid and exercise unprivileged user
+    # namespaces rather than a setuid or privileged backend.
     steps:
-      - name: Install job prerequisites
+      - name: Install bubblewrap
         run: |
-          apt-get update
-          apt-get install --yes --no-install-recommends bubblewrap ca-certificates git util-linux
-          install --directory --mode=0700 --owner=1000 --group=1000 /tmp/localbox-home
-
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -122,14 +116,12 @@ jobs:
       - name: Build package
         run: pnpm build
 
-      - name: Prepare unprivileged test ownership
-        run: chown --recursive 1000:1000 "$GITHUB_WORKSPACE"
 
       - name: Run bubblewrap conformance and security tests
-        run: setpriv --reuid=1000 --regid=1000 --clear-groups env HOME=/tmp/localbox-home PATH="$PATH" pnpm test:bwrap
+        run: pnpm test:bwrap
 
       - name: Run bubblewrap security smoke
-        run: setpriv --reuid=1000 --regid=1000 --clear-groups env HOME=/tmp/localbox-home PATH="$PATH" pnpm smoke:bwrap
+        run: pnpm smoke:bwrap
 
   integration:
     name: Docker integration
