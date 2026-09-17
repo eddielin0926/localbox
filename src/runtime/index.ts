@@ -301,7 +301,11 @@ export type ReadCommandOutputResult = JsonObject & {
  */
 export type RawCommandEvent =
   | (JsonObject & {
-    readonly type: "stdout" | "stderr";
+    readonly type: "stdout";
+    readonly data: string;
+  })
+  | (JsonObject & {
+    readonly type: "stderr";
     readonly data: string;
   })
   | (JsonObject & {

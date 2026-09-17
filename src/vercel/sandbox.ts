@@ -11,6 +11,7 @@ import type {
   SandboxSource as RuntimeSandboxSource,
   StartCommandResult,
 } from "../runtime/index.js";
+import { Command, type CommandRunOptions, CommandFinished, createCommand } from "./command.js";
 import {
   createSandboxClient,
   mutationMetadata,
