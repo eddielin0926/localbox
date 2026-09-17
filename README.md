@@ -4,7 +4,7 @@ Run cloud sandbox SDKs locally during development with Docker.
 
 Localbox is an open-source local development runtime for applications that depend on cloud sandbox SDKs. Its goal is to let those applications run locally with zero or near-zero application-code changes, initially for Vercel Sandbox on Docker.
 
-Localbox v0.2.0 provides the Vercel-compatible `localbox/vercel` API and adds an explicit, opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. No hosted Localbox service, credentials, or configuration file is required for either local path.
+The published v0.2.0 release provides the Vercel-compatible `localbox/vercel` API and an explicit, opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. The repository's pending v0.3.0 release candidate adds the public backend-neutral `localbox/runtime` entry point while preserving the v0.2 compatibility and interception behavior. No hosted Localbox service, credentials, or configuration file is required for either local path.
 
 See [ROADMAP.md](ROADMAP.md) for planned compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
 
@@ -90,7 +90,7 @@ See [`examples/basic.mjs`](examples/basic.mjs) for a runnable example covering p
 
 ## Development interception
 
-Localbox v0.2.0 includes the `localbox --` wrapper. Interception remains an explicit development choice: installing Localbox or running the application normally does not enable it.
+Published v0.2.0 includes the `localbox --` wrapper. Interception remains an explicit development choice: installing Localbox or running the application normally does not enable it.
 
 Keep the application's provider import unchanged:
 
@@ -123,6 +123,8 @@ Further Node descendants participate when they inherit `NODE_OPTIONS`, but are n
 Framework adapters, when a proven bypass requires one, are optional toolchain integrations outside Localbox's core dependencies. They must be explicitly enabled and must never silently select remote execution. See the [v0.2 interception contract](INTERCEPTION.md) for the complete toolchain matrix, evidence rules, diagnostics, and adapter boundary.
 
 ## API reference
+
+Application code continues to use `localbox/vercel` exactly as it did in v0.2. The pending v0.3.0 package also exports `localbox/runtime` for the transport-safe `SandboxClient` contract, `EmbeddedSandboxClient`, backend interface, and `DockerBackend`. The default application composition remains an embedded client bound to one Docker backend. See [RUNTIME.md](RUNTIME.md) for the boundary, command and filesystem ownership, capability-driven conformance profiles, and construction details.
 
 ### Sandbox creation options
 
@@ -213,7 +215,7 @@ Paths are relative to `/vercel/sandbox` unless absolute. Methods accept an `Abor
 
 ## Vercel compatibility
 
-Vercel Sandbox is Localbox's current compatibility target. Localbox v0.2.0 supports direct `localbox/vercel` imports and explicit development interception for the unchanged `@vercel/sandbox` import.
+Vercel Sandbox is Localbox's current compatibility target. Published v0.2.0 supports direct `localbox/vercel` imports and explicit development interception for the unchanged `@vercel/sandbox` import. The pending v0.3.0 release keeps that observable behavior while routing the frontend through the neutral runtime.
 
 Compatibility is checked against `@vercel/sandbox@3.3.0`. The versioned [`compatibility.json`](src/vercel/compatibility.json) records each assessed method, its type compatibility, behavioral differences, and unsupported APIs. Run the report locally with:
 
@@ -227,7 +229,7 @@ The complete documented `Command` and `FileSystem` method sets in that manifest 
 
 | Area | Localbox behavior |
 | --- | --- |
-| Import | Direct imports use `localbox/vercel`; v0.2.0 can intercept the unchanged `@vercel/sandbox` import only under `localbox --`. |
+| Import | Direct imports use `localbox/vercel`; published v0.2.0 and the pending v0.3.0 release candidate can intercept the unchanged `@vercel/sandbox` import only under `localbox --`. |
 | URLs | Exposed ports use loopback URLs; there is no public domain or reverse proxy. |
 | Isolation | Docker containers share the host kernel instead of using microVM isolation. |
 | Persistence | A stopped persistent container retains its writable layer; snapshots are not portable. |

@@ -1,6 +1,6 @@
 # Runtime client contract
 
-The `localbox/runtime` entry point defines the backend-neutral values exchanged between a compatibility frontend and a Localbox runtime. It is the shared contract for embedded and future remote clients; it does not select a transport.
+The pending v0.3.0 release candidate adds the public `localbox/runtime` entry point for backend-neutral values exchanged between a compatibility frontend and a Localbox runtime; this entry point is not part of the published v0.2.0 package. It is the shared contract for embedded and future remote clients and does not select a transport.
 
 ## Boundary invariants
 
@@ -58,4 +58,4 @@ Valid contract failures returned by a backend retain their category, code, messa
 
 ## Intentional non-goals
 
-This layer does not provide a transport server, RPC protocol, durable runtime state beyond current Docker persistence, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, or additional provider APIs. Remote transport remains later M3 work. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
+This layer does not provide a transport server, RPC protocol, durable runtime state beyond current Docker persistence, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, or additional provider APIs. Process, bwrap, and Podman backends and a remote service or control plane remain deferred to later milestones. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
