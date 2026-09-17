@@ -1,4 +1,5 @@
 import Dockerode from "dockerode";
+import { FILESYSTEM_TRANSFER_CHUNK_BYTES } from "../../runtime/filesystem-bridge.js";
 import { MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE } from "../../runtime/internal-filesystem-bridge.js";
 import { MANAGED_IMAGE_REGISTRY } from "./managed-images.js";
 import {
@@ -31,10 +32,6 @@ import type {
   JsonObject,
   ListSandboxesRequest,
   ListSandboxesResult,
-  MakeDirectoryRequest,
-  MakeDirectoryResult,
-  ReadFileRequest,
-  ReadFileResult,
   RequestMetadata,
   SandboxBackend,
   SandboxCapability,
@@ -43,8 +40,6 @@ import type {
   StartRawCommandResult,
   StopSandboxRequest,
   StopSandboxResult,
-  WriteFileRequest,
-  WriteFileResult,
 } from "../../runtime/index.js";
 import { Sandbox as DockerSandbox } from "./sandbox.js";
 import type {
@@ -52,22 +47,6 @@ import type {
   SandboxListItem,
   SandboxSource,
 } from "./types.js";
-const PRIVILEGED_CHOWN = String.raw`
-import * as fs from "node:fs/promises";
-const prefix = "LOCALBOX_ERROR:";
-try {
-  const { path, uid, gid } = JSON.parse(process.argv[1]);
-  await fs.chown(path, uid, gid);
-} catch (error) {
-  process.stderr.write(prefix + JSON.stringify({
-    message: error instanceof Error ? error.message : String(error),
-    code: error && typeof error === "object" && "code" in error ? error.code : undefined,
-    path: error && typeof error === "object" && "path" in error ? error.path : undefined,
-    syscall: error && typeof error === "object" && "syscall" in error ? error.syscall : undefined,
-  }));
-  process.exitCode = 1;
-}
-`;
 
 const REFERENCE = Object.freeze({
   backendId: "local-docker",
@@ -88,6 +67,10 @@ const CAPABILITIES = Object.freeze([
   "sandbox.source.git",
   "sandbox.source.tarball",
 ] satisfies SandboxCapability[]);
+const RAW_COMMAND_CAPABILITIES = Object.freeze([
+  "input",
+  "managed-filesystem-owner",
+] as const);
 
 
 interface DeadlineScope {
@@ -402,6 +385,7 @@ function listRecord(item: SandboxListItem): SandboxRecord {
 export class DockerBackend implements SandboxBackend {
   readonly reference = REFERENCE;
   readonly capabilities = CAPABILITIES;
+  readonly rawCommandCapabilities = RAW_COMMAND_CAPABILITIES;
   readonly #docker: Dockerode;
 
   constructor() {
@@ -510,32 +494,42 @@ export class DockerBackend implements SandboxBackend {
         name: request.sandboxId,
         ...(signal === undefined ? {} : { signal }),
       });
-      const privilegedChown = request.command.user === "0";
-      const chownPayload = request.command.arguments[4];
-      if (privilegedChown && (
-        !sandbox.image.startsWith(`${MANAGED_IMAGE_REGISTRY}:`)
-        || request.command.command !== MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE.nodePath
-        || request.command.arguments[3] !== "chown"
-        || chownPayload === undefined
-      )) {
+      const privileged = request.privilege === "managed-filesystem-owner";
+      if (
+        request.privilege !== undefined &&
+        request.privilege !== "managed-filesystem-owner"
+      ) {
+        throw new UnsupportedSandboxCapabilityError("unknown raw command privilege");
+      }
+      if (request.command.user === "0") {
+        throw new UnsupportedSandboxCapabilityError("arbitrary root command execution");
+      }
+      if (privileged && !sandbox.image.startsWith(`${MANAGED_IMAGE_REGISTRY}:`)) {
         throw new UnsupportedSandboxCapabilityError(
-          "privileged filesystem operations for this command",
+          "privileged filesystem operations for custom images",
         );
+      }
+      const input = request.input === undefined
+        ? undefined
+        : Buffer.from(request.input.data, request.input.encoding);
+      if (input !== undefined && input.length > FILESYSTEM_TRANSFER_CHUNK_BYTES) {
+        throw new RangeError("Raw command input exceeds the filesystem transfer bound.");
       }
       const command = await sandbox.startRawCommand({
         cmd: [
-          privilegedChown
+          privileged
             ? MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE.nodePath
             : request.command.command,
-          ...(privilegedChown
-            ? ["--input-type=module", "-e", PRIVILEGED_CHOWN, chownPayload!]
-            : request.command.arguments),
+          ...request.command.arguments,
         ],
         cwd: request.command.cwd,
         env: Object.entries(request.command.environment).map(
           ([key, value]) => `${key}=${value}`,
         ),
-        ...(privilegedChown ? { user: "0" } : {}),
+        ...(privileged ? { user: "0" } : request.command.user === undefined
+          ? {}
+          : { user: request.command.user }),
+        ...(input === undefined ? {} : { stdin: input }),
         ...(signal === undefined ? {} : { signal }),
       });
       return { ok: true, command };
@@ -545,57 +539,6 @@ export class DockerBackend implements SandboxBackend {
     }
   }
 
-  readFile(request: ReadFileRequest): Promise<ClientResult<ReadFileResult>> {
-    return this.#run(request, "readFile", async (signal) => {
-      if (!Number.isSafeInteger(request.offset) || request.offset < 0) {
-        throw new InvalidSandboxOptionsError("File offset must be a non-negative integer.");
-      }
-      if (!Number.isSafeInteger(request.limitBytes) || request.limitBytes < 1) {
-        throw new InvalidSandboxOptionsError("File read limit must be a positive integer.");
-      }
-      const sandbox = await DockerSandbox.get(this.#docker, { name: request.sandboxId, ...(signal === undefined ? {} : { signal }) });
-      const contents = await sandbox.fs.readFile(
-        request.path,
-        signal === undefined ? null : { encoding: null, signal },
-      );
-      const page = contents.subarray(request.offset, request.offset + request.limitBytes);
-      const nextOffset = request.offset + page.length;
-      return {
-        path: request.path,
-        content: {
-          encoding: request.encoding,
-          data: request.encoding === "base64" ? page.toString("base64") : page.toString("utf8"),
-        },
-        bytesRead: page.length,
-        nextOffset,
-        endOfFile: nextOffset >= contents.length,
-      };
-    });
-  }
-
-  writeFile(request: WriteFileRequest): Promise<ClientResult<WriteFileResult>> {
-    return this.#run(request, "writeFile", async (signal) => {
-      const sandbox = await DockerSandbox.get(this.#docker, { name: request.sandboxId, ...(signal === undefined ? {} : { signal }) });
-      const contents = Buffer.from(request.content.data, request.content.encoding);
-      await sandbox.fs.writeFile(request.path, contents, {
-        ...(request.mode === null ? {} : { mode: request.mode }),
-        ...(signal === undefined ? {} : { signal }),
-      });
-      return { path: request.path, bytesWritten: contents.length };
-    });
-  }
-
-  makeDirectory(request: MakeDirectoryRequest): Promise<ClientResult<MakeDirectoryResult>> {
-    return this.#run(request, "makeDirectory", async (signal) => {
-      const sandbox = await DockerSandbox.get(this.#docker, { name: request.sandboxId, ...(signal === undefined ? {} : { signal }) });
-      const created = await sandbox.fs.mkdir(request.path, {
-        recursive: request.recursive,
-        ...(request.mode === null ? {} : { mode: request.mode }),
-        ...(signal === undefined ? {} : { signal }),
-      });
-      return { path: request.path, created: created !== undefined };
-    });
-  }
 
   getEndpoint(request: GetEndpointRequest): Promise<ClientResult<GetEndpointResult>> {
     return this.#run(request, "getEndpoint", async (signal) => {

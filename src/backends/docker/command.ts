@@ -48,6 +48,7 @@ export interface StartRawCommandOptions {
   cwd: string;
   env: string[];
   user?: string;
+  stdin?: Buffer;
   signal?: AbortSignal;
 }
 
@@ -239,8 +240,9 @@ export async function startRawCommand(
   throwIfAborted(options.signal);
   const pidPath = `/tmp/localbox/command-${randomUUID()}.pid`;
   try {
+    const attachStdin = options.stdin !== undefined;
     const exec = await container.exec({
-      AttachStdin: false,
+      AttachStdin: attachStdin,
       AttachStdout: true,
       AttachStderr: true,
       Tty: false,
@@ -255,10 +257,12 @@ export async function startRawCommand(
       Detach: false,
       Tty: false,
       hijack: true,
-      stdin: false,
+      stdin: attachStdin,
       ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
     });
-    return new DockerRawCommand(docker, container, exec, pidPath, stream);
+    const command = new DockerRawCommand(docker, container, exec, pidPath, stream);
+    if (options.stdin !== undefined) stream.end(options.stdin);
+    return command;
   } catch (error) {
     if (options.signal?.aborted) throw abortError();
     translateDockerError(error);

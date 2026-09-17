@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { FilesystemBridge } from "./filesystem-bridge.js";
 import type {
   BackendReference,
   ClientFailure,
@@ -27,6 +28,8 @@ import type {
   ReadCommandOutputRequest,
   ReadCommandOutputResult,
   ReadFileRequest,
+  RunFilesystemOperationRequest,
+  RunFilesystemOperationResult,
   ReadFileResult,
   RequestMetadata,
   SandboxBackend,
@@ -66,6 +69,7 @@ const ERROR_DETAIL_TYPES: Record<SandboxErrorDetails["type"], true> = {
   resource: true,
   backend: true,
   source: true,
+  file: true,
   none: true,
 };
 
@@ -84,10 +88,14 @@ const SANDBOX_CAPABILITIES: Record<SandboxCapability, true> = {
   "sandbox.source.tarball": true,
 };
 
-type BackendOperation = Exclude<
-  keyof SandboxClient,
-  "startCommand" | "waitForCommand" | "signalProcess" | "readCommandOutput"
->;
+type BackendOperation =
+  | "createSandbox"
+  | "getSandbox"
+  | "listSandboxes"
+  | "stopSandbox"
+  | "deleteSandbox"
+  | "extendSandboxDeadline"
+  | "getEndpoint";
 type OperationRequest<Operation extends BackendOperation> = Parameters<SandboxBackend[Operation]>[0];
 type OperationResult<Operation extends BackendOperation> = Awaited<
   ReturnType<SandboxBackend[Operation]>
@@ -211,6 +219,12 @@ function isErrorDetails(value: unknown): value is SandboxErrorDetails {
       return typeof value.operation === "string";
     case "source":
       return value.sourceType === "git" || value.sourceType === "tarball";
+    case "file":
+      return (
+        (value.code === null || typeof value.code === "string") &&
+        (value.syscall === null || typeof value.syscall === "string") &&
+        (value.path === null || typeof value.path === "string")
+      );
     case "none":
       return true;
     default:
@@ -654,6 +668,7 @@ export class EmbeddedSandboxClient implements SandboxClient {
   readonly backendReference: BackendReference;
   readonly #capabilities: ReadonlySet<SandboxCapability>;
   readonly #processes = new Map<string, RuntimeProcess>();
+  readonly #filesystem: FilesystemBridge;
 
   constructor(backend: SandboxBackend) {
     if (!isBackendReference(backend.reference)) {
@@ -665,6 +680,7 @@ export class EmbeddedSandboxClient implements SandboxClient {
       backendType: backend.reference.backendType,
     });
     this.#capabilities = new Set(backend.capabilities);
+    this.#filesystem = new FilesystemBridge(backend);
   }
 
   async createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
@@ -962,19 +978,37 @@ export class EmbeddedSandboxClient implements SandboxClient {
   }
 
   readFile(request: ReadFileRequest): Promise<ClientResult<ReadFileResult>> {
-    return this.#invoke("readFile", request);
+    return this.#invokeFilesystem((signal) => this.#filesystem.readFile(request, signal), request);
   }
 
   writeFile(request: WriteFileRequest): Promise<ClientResult<WriteFileResult>> {
-    return this.#invoke("writeFile", request);
+    return this.#invokeFilesystem((signal) => this.#filesystem.writeFile(request, signal), request);
   }
 
   makeDirectory(request: MakeDirectoryRequest): Promise<ClientResult<MakeDirectoryResult>> {
-    return this.#invoke("makeDirectory", request);
+    return this.#invokeFilesystem((signal) => this.#filesystem.makeDirectory(request, signal), request);
+  }
+
+  runFilesystemOperation(
+    request: RunFilesystemOperationRequest,
+  ): Promise<ClientResult<RunFilesystemOperationResult>> {
+    return this.#invokeFilesystem((signal) => this.#filesystem.run(request, signal), request);
   }
 
   getEndpoint(request: GetEndpointRequest): Promise<ClientResult<GetEndpointResult>> {
     return this.#invoke("getEndpoint", request);
+  }
+
+  async #invokeFilesystem<Result extends JsonObject>(
+    operation: (signal: AbortSignal | undefined) => Promise<ClientResult<Result>>,
+    request: RequestMetadata,
+  ): Promise<ClientResult<Result>> {
+    const scope = deadlineScope(request);
+    try {
+      return await operation(scope.signal);
+    } finally {
+      scope.dispose();
+    }
   }
 
   async #invoke<Operation extends BackendOperation>(

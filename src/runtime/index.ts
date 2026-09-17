@@ -76,6 +76,11 @@ export type SandboxCapability =
   | "sandbox.source.git"
   | "sandbox.source.tarball";
 
+/** Optional raw-execution features used by the neutral filesystem bridge. */
+export type RawCommandCapability =
+  | "input"
+  | "managed-filesystem-owner";
+
 /** A semantic requirement that must be checked before sandbox creation. */
 export type SandboxRequirement = JsonObject & {
   readonly capability: SandboxCapability;
@@ -330,6 +335,10 @@ export interface RawCommand {
 
 export type StartRawCommandRequest = RequestMetadata & SandboxReference & {
   readonly command: CommandSpec;
+  /** Bounded binary-safe stdin supplied outside the command argument vector. */
+  readonly input?: FileContent;
+  /** Narrow internal privilege grant; never an arbitrary public root user. */
+  readonly privilege?: "managed-filesystem-owner";
 };
 
 export type StartRawCommandResult =
@@ -382,6 +391,39 @@ export type MakeDirectoryRequest = MutationMetadata & SandboxReference & {
 export type MakeDirectoryResult = JsonObject & {
   readonly path: string;
   readonly created: boolean;
+};
+
+export type FilesystemOperation =
+  | "appendFile"
+  | "readdir"
+  | "stat"
+  | "lstat"
+  | "unlink"
+  | "rm"
+  | "rmdir"
+  | "rename"
+  | "copyFile"
+  | "access"
+  | "chmod"
+  | "chown"
+  | "symlink"
+  | "readlink"
+  | "realpath"
+  | "truncate"
+  | "mkdtemp";
+
+/**
+ * Provider-neutral semantic filesystem operation. Operation arguments and
+ * results remain plain JSON; binary append data uses FileContent.
+ */
+export type RunFilesystemOperationRequest = MutationMetadata & SandboxReference & {
+  readonly operation: FilesystemOperation;
+  readonly arguments: JsonObject;
+  readonly content: FileContent | null;
+};
+
+export type RunFilesystemOperationResult = JsonObject & {
+  readonly value: JsonValue;
 };
 
 export type GetEndpointRequest = RequestMetadata & SandboxReference & {
@@ -443,6 +485,13 @@ export type SourceErrorDetails = JsonObject & {
   readonly sourceType: "git" | "tarball";
 };
 
+export type FileErrorDetails = JsonObject & {
+  readonly type: "file";
+  readonly code: string | null;
+  readonly syscall: string | null;
+  readonly path: string | null;
+};
+
 export type NoErrorDetails = JsonObject & {
   readonly type: "none";
 };
@@ -453,6 +502,7 @@ export type SandboxErrorDetails =
   | ResourceErrorDetails
   | BackendErrorDetails
   | SourceErrorDetails
+  | FileErrorDetails
   | NoErrorDetails;
 
 /** Stable failure data. Implementations must not return Error instances or causes. */
@@ -503,6 +553,9 @@ export interface SandboxClient {
   readFile(request: ReadFileRequest): Promise<ClientResult<ReadFileResult>>;
   writeFile(request: WriteFileRequest): Promise<ClientResult<WriteFileResult>>;
   makeDirectory(request: MakeDirectoryRequest): Promise<ClientResult<MakeDirectoryResult>>;
+  runFilesystemOperation(
+    request: RunFilesystemOperationRequest,
+  ): Promise<ClientResult<RunFilesystemOperationResult>>;
 
   getEndpoint(request: GetEndpointRequest): Promise<ClientResult<GetEndpointResult>>;
 }
@@ -520,13 +573,11 @@ export type SandboxBackend = Pick<
   | "stopSandbox"
   | "deleteSandbox"
   | "extendSandboxDeadline"
-  | "readFile"
-  | "writeFile"
-  | "makeDirectory"
   | "getEndpoint"
 > & {
   readonly reference: BackendReference;
   readonly capabilities: readonly SandboxCapability[];
+  readonly rawCommandCapabilities: readonly RawCommandCapability[];
   startRawCommand(
     request: StartRawCommandRequest,
     signal?: AbortSignal,
