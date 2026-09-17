@@ -10,6 +10,11 @@ import {
   unwrap,
   withAbort,
 } from "./client.js";
+import { UnsupportedSandboxCapabilityError } from "./errors.js";
+import {
+  managedFilesystemPrivilegeBridge,
+  type ManagedFilesystemPrivilegeBridge,
+} from "./managed-filesystem-bridge.js";
 
 const WORKSPACE = "/vercel/sandbox";
 const ERROR_PREFIX = "LOCALBOX_ERROR:";
@@ -135,6 +140,7 @@ type SerializedFileType =
 interface FileSystemState {
   readonly client: SandboxClient;
   readonly sandboxId: string;
+  readonly privilegeBridge: ManagedFilesystemPrivilegeBridge | null;
   readonly ensureRunning: (signal?: AbortSignal) => Promise<void>;
 }
 
@@ -412,7 +418,19 @@ export class FileSystem {
     gid: number,
     options: FileOperationOptions = {},
   ): Promise<void> {
-    await this.#run("chown", { path: resolveSandboxPath(path), uid, gid }, undefined, options.signal);
+    const privilegeBridge = this.#state.privilegeBridge;
+    if (privilegeBridge === null) {
+      throw new UnsupportedSandboxCapabilityError(
+        "privileged filesystem operations for custom images",
+      );
+    }
+    await this.#run(
+      "chown",
+      { path: resolveSandboxPath(path), uid, gid },
+      undefined,
+      options.signal,
+      privilegeBridge,
+    );
   }
 
   async symlink(
@@ -453,6 +471,7 @@ export class FileSystem {
     args: Record<string, unknown>,
     stdin?: Buffer,
     signal?: AbortSignal,
+    privilegeBridge?: ManagedFilesystemPrivilegeBridge,
   ): Promise<Buffer> {
     await this.#state.ensureRunning(signal);
     throwIfAborted(signal);
@@ -472,10 +491,10 @@ export class FileSystem {
       sandboxId: this.#state.sandboxId,
       processId,
       command: {
-        command: operation === "chown" ? "/usr/bin/sudo" : "node",
-        arguments: operation === "chown"
-          ? ["-n", "/usr/local/bin/node", ...nodeArguments]
-          : nodeArguments,
+        command: privilegeBridge?.sudoPath ?? "node",
+        arguments: privilegeBridge === undefined
+          ? nodeArguments
+          : ["-n", privilegeBridge.nodePath, ...nodeArguments],
         cwd: WORKSPACE,
         environment: {},
       },
@@ -493,7 +512,13 @@ export class FileSystem {
 export function createFileSystem(
   client: SandboxClient,
   sandboxId: string,
+  image: string,
   ensureRunning: (signal?: AbortSignal) => Promise<void>,
 ): FileSystem {
-  return new FileSystem({ client, sandboxId, ensureRunning } as never);
+  return new FileSystem({
+    client,
+    sandboxId,
+    privilegeBridge: managedFilesystemPrivilegeBridge(image),
+    ensureRunning,
+  } as never);
 }
