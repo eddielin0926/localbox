@@ -91,18 +91,17 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Hosted runners block unprivileged user-namespace creation. A privileged
-    # job container provides a controlled setuid bubblewrap fixture while the
-    # backend and tests themselves still run as an ordinary uid.
+    # Hosted runners restrict unprivileged user namespaces. The privileged,
+    # AppArmor-unconfined job container supplies that kernel prerequisite;
+    # Localbox and bubblewrap still execute as the ordinary uid 1000.
     container:
       image: ubuntu:24.04
-      options: --privileged
+      options: --privileged --security-opt apparmor=unconfined
     steps:
       - name: Install job prerequisites
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends bubblewrap ca-certificates git util-linux
-          chmod 4755 /usr/bin/bwrap
           install --directory --mode=0700 --owner=1000 --group=1000 /tmp/localbox-home
 
       - name: Check out repository

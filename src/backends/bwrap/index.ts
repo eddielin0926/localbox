@@ -42,6 +42,22 @@ import { ProcessBackend } from "../process/index.js";
 const VIRTUAL_WORKSPACE = "/vercel/sandbox";
 const INTERNAL_NETWORK_TAG = "localbox.internal.bwrap.network-policy";
 const MAX_PROBE_OUTPUT_BYTES = 64 * 1024;
+const BWRAP_COMMAND_PROGRAM = String.raw`
+import { spawn } from "node:child_process";
+const child = spawn(process.argv[1], process.argv.slice(2), { stdio: "inherit" });
+child.once("error", (error) => {
+  const code = error && typeof error === "object" && "code" in error ? error.code : "UNKNOWN";
+  process.stderr.write("Failed to spawn sandbox command (" + code + ").\n");
+  process.exitCode = code === "ENOENT" ? 127 : 1;
+});
+child.once("exit", (code, signal) => {
+  if (signal === null) process.exitCode = code ?? 1;
+  else {
+    process.once(signal, () => undefined);
+    process.kill(process.pid, signal);
+  }
+});
+`;
 const HOST_ARTIFACT = Object.freeze({
   kind: "host",
   locator: { type: "host", selector: "current" },
@@ -480,7 +496,15 @@ export class BwrapBackend implements SandboxBackend {
       ...environment,
     };
     for (const [key, value] of Object.entries(sandboxEnvironment)) args.push("--setenv", key, value);
-    args.push("--", "/usr/bin/env", "--", command.command, ...command.arguments);
+    args.push(
+      "--",
+      process.execPath,
+      "--input-type=module",
+      "-e",
+      BWRAP_COMMAND_PROGRAM,
+      command.command,
+      ...command.arguments,
+    );
     return args;
   }
 
