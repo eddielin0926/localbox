@@ -711,6 +711,14 @@ export interface SandboxClient {
   getEndpoint(request: GetEndpointRequest): Promise<ClientResult<GetEndpointResult>>;
 }
 
+/** Internal host mapping used only by the neutral filesystem bridge. */
+export type FilesystemWorkspace = Readonly<{
+  /** Absolute private workspace root; never returned through SandboxClient. */
+  root: string;
+  /** Backend-visible virtual root used in public file paths. */
+  virtualRoot: string;
+}>;
+
 /**
  * In-process execution port. SandboxClient command lifecycle operations are
  * deliberately absent: a backend only starts a raw command and emits
@@ -728,6 +736,11 @@ export type SandboxBackend = Pick<
 > & {
   readonly reference: BackendReference;
   readonly capabilities: SandboxCapabilities;
+  /**
+   * Optional explicit workspace mapping for host-style backends. Container
+   * backends omit it and receive virtual paths unchanged.
+   */
+  filesystemWorkspace?(sandboxId: SandboxId): Promise<FilesystemWorkspace>;
   startRawCommand(
     request: StartRawCommandRequest,
     signal?: AbortSignal,
@@ -766,3 +779,10 @@ export {
   MANAGED_IMAGE_REGISTRY,
   MANAGED_IMAGE_UPSTREAM_COMMIT,
 } from "../default-client.js";
+export {
+  PROCESS_CAPABILITIES,
+  PROCESS_RUNTIME,
+  PROCESS_VIRTUAL_WORKSPACE,
+  ProcessBackend,
+} from "../backends/process/index.js";
+export type { ProcessBackendOptions } from "../backends/process/index.js";

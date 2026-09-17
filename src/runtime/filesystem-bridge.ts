@@ -37,10 +37,71 @@ const FILESYSTEM_READ_OPERATIONS: Readonly<Partial<Record<FilesystemOperation, t
 const FILESYSTEM_PROGRAM = String.raw`
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 const operation = process.argv[1];
 const args = JSON.parse(Buffer.from(process.argv[2], "base64").toString("utf8"));
-const transferPath = (id) => "/tmp/localbox-filesystem-" + id;
+const hostRoot = process.env.LOCALBOX_INTERNAL_FILESYSTEM_ROOT;
+const virtualRoot = process.env.LOCALBOX_INTERNAL_FILESYSTEM_VIRTUAL_ROOT;
+const mapped = typeof hostRoot === "string" && typeof virtualRoot === "string";
+const normalizedHostRoot = mapped ? path.resolve(hostRoot) : null;
+const normalizedVirtualRoot = mapped ? path.posix.resolve(virtualRoot) : null;
+const realHostRoot = mapped ? await fsp.realpath(normalizedHostRoot) : null;
+const inside = (root, value) => value === root || value.startsWith(root + path.sep);
+const reversePath = (value) => {
+  if (!mapped || typeof value !== "string") return value;
+  const normalized = path.resolve(value);
+  const root = inside(normalizedHostRoot, normalized)
+    ? normalizedHostRoot
+    : inside(realHostRoot, normalized) ? realHostRoot : null;
+  if (root === null) return value;
+  const suffix = path.relative(root, normalized).split(path.sep).join("/");
+  return suffix.length === 0 ? normalizedVirtualRoot : normalizedVirtualRoot + "/" + suffix;
+};
+const invalidPath = (value) => Object.assign(new Error("Filesystem path escapes " + normalizedVirtualRoot + "."), {
+  code: "EACCES",
+  syscall: operation,
+  path: value,
+});
+const lexicalPath = (value) => {
+  if (!mapped) return value;
+  const virtual = path.posix.isAbsolute(value)
+    ? path.posix.normalize(value)
+    : path.posix.resolve(normalizedVirtualRoot, value);
+  if (virtual !== normalizedVirtualRoot && !virtual.startsWith(normalizedVirtualRoot + "/")) {
+    throw invalidPath(value);
+  }
+  const suffix = virtual === normalizedVirtualRoot ? "" : virtual.slice(normalizedVirtualRoot.length + 1);
+  const host = path.resolve(normalizedHostRoot, ...suffix.split("/").filter(Boolean));
+  if (!inside(normalizedHostRoot, host)) throw invalidPath(value);
+  return host;
+};
+const safePath = async (value, { allowMissing = false, followFinal = true } = {}) => {
+  const host = lexicalPath(value);
+  if (!mapped) return host;
+  const rootReal = realHostRoot;
+  let probe = followFinal ? host : path.dirname(host);
+  while (true) {
+    try {
+      const probeReal = await fsp.realpath(probe);
+      if (!inside(rootReal, probeReal)) throw invalidPath(value);
+      break;
+    } catch (error) {
+      if (!allowMissing || !error || typeof error !== "object" || error.code !== "ENOENT") throw error;
+      const parent = path.dirname(probe);
+      if (parent === probe || !inside(normalizedHostRoot, parent)) throw invalidPath(value);
+      probe = parent;
+    }
+  }
+  return host;
+};
+const transferPath = async (id) => {
+  if (!/^[a-f0-9-]{36}$/i.test(id)) throw invalidPath(id);
+  if (!mapped) return "/tmp/localbox-filesystem-" + id;
+  const directory = path.join(normalizedHostRoot, ".localbox-transfers");
+  await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+  return path.join(directory, id);
+};
 const readInput = async () => {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -66,7 +127,8 @@ const dirent = (value, parentPath) => ({ name: value.name, parentPath, type: typ
 try {
   switch (operation) {
     case "readFile": {
-      const handle = await fsp.open(args.path, "r");
+      const target = await safePath(args.path);
+      const handle = await fsp.open(target, "r");
       try {
         const value = await handle.stat();
         const available = Math.max(0, value.size - args.offset);
@@ -87,8 +149,9 @@ try {
       break;
     }
     case "stageWrite": {
+      await safePath(args.path, { allowMissing: true });
       const input = await readInput();
-      const temporary = transferPath(args.transferId);
+      const temporary = await transferPath(args.transferId);
       const handle = await fsp.open(temporary, args.offset === 0 ? "wx" : "r+");
       try {
         const value = await handle.stat();
@@ -101,11 +164,12 @@ try {
       break;
     }
     case "commitWrite": {
-      const temporary = transferPath(args.transferId);
+      const temporary = await transferPath(args.transferId);
+      const target = await safePath(args.path, { allowMissing: true });
       try {
         await pipeline(
           fs.createReadStream(temporary),
-          fs.createWriteStream(args.path, {
+          fs.createWriteStream(target, {
             flags: args.append ? "a" : "w",
             ...(args.mode === null ? {} : { mode: args.mode }),
           }),
@@ -115,36 +179,70 @@ try {
       }
       break;
     }
-    case "cleanupTransfer": await fsp.rm(transferPath(args.transferId), { force: true }); break;
-    case "mkdir": json(await fsp.mkdir(args.path, args.options)); break;
+    case "cleanupTransfer": await fsp.rm(await transferPath(args.transferId), { force: true }); break;
+    case "mkdir": json(await fsp.mkdir(await safePath(args.path, { allowMissing: true }), args.options)); break;
     case "readdir": {
-      const entries = await fsp.readdir(args.path, { withFileTypes: args.withFileTypes });
+      const entries = await fsp.readdir(await safePath(args.path), { withFileTypes: args.withFileTypes });
       json(args.withFileTypes ? entries.map((entry) => dirent(entry, args.path)) : entries);
       break;
     }
-    case "stat": json(stats(await fsp.stat(args.path))); break;
-    case "lstat": json(stats(await fsp.lstat(args.path))); break;
-    case "unlink": await fsp.unlink(args.path); break;
-    case "rm": await fsp.rm(args.path, args.options); break;
-    case "rmdir": await fsp.rmdir(args.path); break;
-    case "rename": await fsp.rename(args.oldPath, args.newPath); break;
-    case "copyFile": await fsp.copyFile(args.src, args.dest); break;
-    case "access": await fsp.access(args.path); break;
-    case "chmod": await fsp.chmod(args.path, args.mode); break;
-    case "chown": await fsp.chown(args.path, args.uid, args.gid); break;
-    case "symlink": await fsp.symlink(args.target, args.path); break;
-    case "readlink": json(await fsp.readlink(args.path)); break;
-    case "realpath": json(await fsp.realpath(args.path)); break;
-    case "truncate": await fsp.truncate(args.path, args.len); break;
-    case "mkdtemp": json(await fsp.mkdtemp(args.prefix)); break;
+    case "stat": json(stats(await fsp.stat(await safePath(args.path)))); break;
+    case "lstat": json(stats(await fsp.lstat(await safePath(args.path, { followFinal: false })))); break;
+    case "unlink": await fsp.unlink(await safePath(args.path, { followFinal: false })); break;
+    case "rm": await fsp.rm(await safePath(args.path, { allowMissing: args.options.force, followFinal: false }), args.options); break;
+    case "rmdir": await fsp.rmdir(await safePath(args.path, { followFinal: false })); break;
+    case "rename": await fsp.rename(
+      await safePath(args.oldPath, { followFinal: false }),
+      await safePath(args.newPath, { allowMissing: true, followFinal: false }),
+    ); break;
+    case "copyFile": await fsp.copyFile(
+      await safePath(args.src),
+      await safePath(args.dest, { allowMissing: true }),
+    ); break;
+    case "access": await fsp.access(await safePath(args.path)); break;
+    case "chmod": await fsp.chmod(await safePath(args.path), args.mode); break;
+    case "chown": await fsp.chown(await safePath(args.path), args.uid, args.gid); break;
+    case "symlink": {
+      const destination = await safePath(args.path, { allowMissing: true, followFinal: false });
+      let target = args.target;
+      if (mapped) {
+        const destinationVirtual = path.posix.isAbsolute(args.path)
+          ? path.posix.normalize(args.path)
+          : path.posix.resolve(normalizedVirtualRoot, args.path);
+        const targetVirtual = path.posix.isAbsolute(args.target)
+          ? path.posix.normalize(args.target)
+          : path.posix.resolve(path.posix.dirname(destinationVirtual), args.target);
+        const targetHost = await safePath(targetVirtual, { allowMissing: true });
+        target = path.posix.isAbsolute(args.target)
+          ? targetHost
+          : path.relative(path.dirname(destination), targetHost);
+      }
+      await fsp.symlink(target, destination);
+      break;
+    }
+    case "readlink": {
+      const linkPath = await safePath(args.path, { followFinal: false });
+      const value = await fsp.readlink(linkPath);
+      if (mapped) {
+        const resolved = path.isAbsolute(value) ? path.resolve(value) : path.resolve(path.dirname(linkPath), value);
+        if (!inside(normalizedHostRoot, resolved) && !inside(realHostRoot, resolved)) throw invalidPath(args.path);
+      }
+      json(path.isAbsolute(value) ? reversePath(value) : value);
+      break;
+    }
+    case "realpath": json(reversePath(await fsp.realpath(await safePath(args.path)))); break;
+    case "truncate": await fsp.truncate(await safePath(args.path), args.len); break;
+    case "mkdtemp": json(reversePath(await fsp.mkdtemp(await safePath(args.prefix, { allowMissing: true })))); break;
     default: throw Object.assign(new Error("Unknown filesystem operation."), { code: "EINVAL" });
   }
 } catch (error) {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const message = mapped ? rawMessage.split(normalizedHostRoot).join(normalizedVirtualRoot) : rawMessage;
   process.stderr.write(${JSON.stringify(ERROR_PREFIX)} + JSON.stringify({
-    message: error instanceof Error ? error.message : String(error),
+    message,
     code: error && typeof error === "object" && "code" in error ? error.code : null,
     syscall: error && typeof error === "object" && "syscall" in error ? error.syscall : null,
-    path: error && typeof error === "object" && "path" in error ? error.path : null,
+    path: error && typeof error === "object" && "path" in error ? reversePath(error.path) : null,
   }));
   process.exitCode = 1;
 }
@@ -529,6 +627,13 @@ export class FilesystemBridge {
     privilege: "managed-filesystem-owner" | null = null,
   ): Promise<BridgeCommandResult> {
     if (signal?.aborted) throw new BridgeFailure(cancelled(request, this.#backend));
+    const workspace = await this.#backend.filesystemWorkspace?.(request.sandboxId);
+    const environment = workspace === undefined
+      ? {}
+      : {
+          LOCALBOX_INTERNAL_FILESYSTEM_ROOT: workspace.root,
+          LOCALBOX_INTERNAL_FILESYSTEM_VIRTUAL_ROOT: workspace.virtualRoot,
+        };
     const started = await this.#backend.startRawCommand({
       requestId: request.requestId,
       deadline: request.deadline,
@@ -537,7 +642,7 @@ export class FilesystemBridge {
         command: "node",
         arguments: ["--input-type=module", "-e", FILESYSTEM_PROGRAM, operation, encodeArguments(arguments_)],
         cwd: WORKSPACE,
-        environment: {},
+        environment,
       },
       ...(input === null ? {} : { input }),
       ...(privilege === null ? {} : { privilege }),
