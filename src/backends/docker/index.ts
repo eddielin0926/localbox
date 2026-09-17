@@ -17,7 +17,6 @@ import type {
   BackendReference,
   ClientFailure,
   ClientResult,
-  CommandOutputChunk,
   CreateSandboxRequest,
   CreateSandboxResult,
   DeleteSandboxRequest,
@@ -34,27 +33,19 @@ import type {
   ListSandboxesResult,
   MakeDirectoryRequest,
   MakeDirectoryResult,
-  ProcessRecord,
-  ReadCommandOutputRequest,
-  ReadCommandOutputResult,
   ReadFileRequest,
   ReadFileResult,
   RequestMetadata,
   SandboxBackend,
   SandboxCapability,
   SandboxRecord,
-  SignalProcessRequest,
-  SignalProcessResult,
-  StartCommandRequest,
-  StartCommandResult,
+  StartRawCommandRequest,
+  StartRawCommandResult,
   StopSandboxRequest,
   StopSandboxResult,
-  WaitForCommandRequest,
-  WaitForCommandResult,
   WriteFileRequest,
   WriteFileResult,
 } from "../../runtime/index.js";
-import { type Command, type CommandChunk } from "./command.js";
 import { Sandbox as DockerSandbox } from "./sandbox.js";
 import type {
   SandboxCreateOptions,
@@ -98,20 +89,6 @@ const CAPABILITIES = Object.freeze([
   "sandbox.source.tarball",
 ] satisfies SandboxCapability[]);
 
-interface BackendProcess {
-  readonly sandboxId: string;
-  readonly processId: string;
-  readonly command: Command;
-  readonly cwd: string;
-  readonly startedAt: number;
-  readonly chunks: CommandChunk[];
-  readonly outputLimitBytes: number;
-  retainedBytes: number;
-  truncated: boolean;
-  complete: boolean;
-  finishedAt: number | null;
-  exitCode: number | null;
-}
 
 interface DeadlineScope {
   readonly signal: AbortSignal | undefined;
@@ -421,39 +398,11 @@ function listRecord(item: SandboxListItem): SandboxRecord {
   };
 }
 
-function processRecord(state: BackendProcess): ProcessRecord {
-  return {
-    sandboxId: state.sandboxId,
-    processId: state.processId,
-    status: state.finishedAt === null ? "running" : "exited",
-    cwd: state.cwd,
-    startedAt: state.startedAt,
-    finishedAt: state.finishedAt,
-    exitCode: state.exitCode,
-  };
-}
-
-function processKey(sandboxId: string, processId: string): string {
-  return `${sandboxId}\0${processId}`;
-}
-
-function parseOutputCursor(cursor: string | null): { index: number; offset: number } {
-  if (cursor === null) return { index: 0, offset: 0 };
-  const match = /^(\d+):(\d+)$/.exec(cursor);
-  if (match === null) throw new InvalidSandboxOptionsError("Command output cursor is invalid.");
-  const index = Number(match[1]);
-  const offset = Number(match[2]);
-  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(offset)) {
-    throw new InvalidSandboxOptionsError("Command output cursor is invalid.");
-  }
-  return { index, offset };
-}
 
 export class DockerBackend implements SandboxBackend {
   readonly reference = REFERENCE;
   readonly capabilities = CAPABILITIES;
   readonly #docker: Dockerode;
-  readonly #processes = new Map<string, BackendProcess>();
 
   constructor() {
     this.#docker = new Dockerode();
@@ -552,15 +501,16 @@ export class DockerBackend implements SandboxBackend {
     });
   }
 
-  startCommand(request: StartCommandRequest): Promise<ClientResult<StartCommandResult>> {
-    return this.#run(request, "startCommand", async (signal) => {
-      if (!Number.isSafeInteger(request.outputLimitBytes) || request.outputLimitBytes < 1) {
-        throw new InvalidSandboxOptionsError("Command output limit must be a positive integer.");
-      }
-      const sandbox = await DockerSandbox.get(this.#docker, { name: request.sandboxId, ...(signal === undefined ? {} : { signal }) });
-      const privilegedChown = request.processId.startsWith(
-        MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE.processIdPrefix,
-      );
+  async startRawCommand(
+    request: StartRawCommandRequest,
+    signal?: AbortSignal,
+  ): Promise<StartRawCommandResult> {
+    try {
+      const sandbox = await DockerSandbox.get(this.#docker, {
+        name: request.sandboxId,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      const privilegedChown = request.command.user === "0";
       const chownPayload = request.command.arguments[4];
       if (privilegedChown && (
         !sandbox.image.startsWith(`${MANAGED_IMAGE_REGISTRY}:`)
@@ -572,126 +522,27 @@ export class DockerBackend implements SandboxBackend {
           "privileged filesystem operations for this command",
         );
       }
-      const command = await sandbox.runCommand({
-        cmd: privilegedChown
-          ? MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE.nodePath
-          : request.command.command,
-        args: privilegedChown
-          ? ["--input-type=module", "-e", PRIVILEGED_CHOWN, chownPayload!]
-          : [...request.command.arguments],
+      const command = await sandbox.startRawCommand({
+        cmd: [
+          privilegedChown
+            ? MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE.nodePath
+            : request.command.command,
+          ...(privilegedChown
+            ? ["--input-type=module", "-e", PRIVILEGED_CHOWN, chownPayload!]
+            : request.command.arguments),
+        ],
         cwd: request.command.cwd,
-        env: { ...request.command.environment },
+        env: Object.entries(request.command.environment).map(
+          ([key, value]) => `${key}=${value}`,
+        ),
         ...(privilegedChown ? { user: "0" } : {}),
-        detached: true,
         ...(signal === undefined ? {} : { signal }),
       });
-      const state: BackendProcess = {
-        sandboxId: request.sandboxId,
-        processId: request.processId,
-        command,
-        cwd: request.command.cwd,
-        startedAt: command.startedAt,
-        chunks: [],
-        outputLimitBytes: request.outputLimitBytes,
-        retainedBytes: 0,
-        truncated: false,
-        complete: false,
-        finishedAt: null,
-        exitCode: null,
-      };
-      this.#processes.set(processKey(request.sandboxId, request.processId), state);
-      void (async () => {
-        try {
-          for await (const chunk of command.logs()) {
-            const bytes = Buffer.from(chunk.data);
-            const available = state.outputLimitBytes - state.retainedBytes;
-            if (bytes.length > available) state.truncated = true;
-            if (available <= 0) continue;
-            const retained = bytes.subarray(0, available);
-            state.chunks.push({ stream: chunk.stream, data: retained.toString("utf8") });
-            state.retainedBytes += retained.length;
-          }
-        } finally {
-          state.complete = true;
-        }
-      })().catch(() => undefined);
-      void command.wait().then((finished) => {
-        state.finishedAt = state.startedAt + (finished.durationMs ?? 0);
-        state.exitCode = finished.exitCode;
-      }).catch(() => {
-        state.complete = true;
-      });
-      return { process: processRecord(state) };
-    });
-  }
-
-  waitForCommand(request: WaitForCommandRequest): Promise<ClientResult<WaitForCommandResult>> {
-    return this.#run(request, "waitForCommand", async (signal) => {
-      const state = this.#processes.get(processKey(request.sandboxId, request.processId));
-      if (state === undefined) throw new SandboxNotFoundError(request.sandboxId);
-      const finished = await state.command.wait(signal === undefined ? {} : { signal });
-      state.finishedAt = state.startedAt + (finished.durationMs ?? 0);
-      state.exitCode = finished.exitCode;
-      return {
-        result: {
-          process: processRecord(state),
-          durationMs: finished.durationMs ?? 0,
-          exitCode: finished.exitCode,
-        },
-      };
-    });
-  }
-
-  signalProcess(request: SignalProcessRequest): Promise<ClientResult<SignalProcessResult>> {
-    return this.#run(request, "signalProcess", async (signal) => {
-      const state = this.#processes.get(processKey(request.sandboxId, request.processId));
-      if (state === undefined) throw new SandboxNotFoundError(request.sandboxId);
-      await state.command.kill(request.signal, signal === undefined ? {} : { abortSignal: signal });
-      return { process: processRecord(state) };
-    });
-  }
-
-  readCommandOutput(request: ReadCommandOutputRequest): Promise<ClientResult<ReadCommandOutputResult>> {
-    return this.#run(request, "readCommandOutput", async () => {
-      const state = this.#processes.get(processKey(request.sandboxId, request.processId));
-      if (state === undefined) throw new SandboxNotFoundError(request.sandboxId);
-      if (!Number.isSafeInteger(request.limitBytes) || request.limitBytes < 1) {
-        throw new InvalidSandboxOptionsError("Command output limit must be a positive integer.");
-      }
-      let { index, offset } = parseOutputCursor(request.cursor);
-      let remaining = request.limitBytes;
-      const chunks: CommandOutputChunk[] = [];
-      while (index < state.chunks.length && remaining > 0) {
-        const chunk = state.chunks[index];
-        if (chunk === undefined) break;
-        const bytes = Buffer.from(chunk.data);
-        if (offset >= bytes.length) {
-          index += 1;
-          offset = 0;
-          continue;
-        }
-        if (request.stream !== "both" && request.stream !== chunk.stream) {
-          index += 1;
-          offset = 0;
-          continue;
-        }
-        const length = Math.min(remaining, bytes.length - offset);
-        chunks.push({ stream: chunk.stream, data: bytes.subarray(offset, offset + length).toString("utf8") });
-        remaining -= length;
-        offset += length;
-        if (offset >= bytes.length) {
-          index += 1;
-          offset = 0;
-        }
-      }
-      const caughtUp = index >= state.chunks.length;
-      return {
-        chunks,
-        nextCursor: state.complete && caughtUp ? null : `${index}:${offset}`,
-        complete: state.complete && caughtUp,
-        truncated: state.truncated,
-      };
-    });
+      return { ok: true, command };
+    } catch (error) {
+      const expired = request.deadline !== null && request.deadline.expiresAt <= Date.now();
+      return translatedFailure(request.requestId, "startCommand", error, expired);
+    }
   }
 
   readFile(request: ReadFileRequest): Promise<ClientResult<ReadFileResult>> {

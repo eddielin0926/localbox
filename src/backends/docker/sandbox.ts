@@ -6,7 +6,8 @@ import { posix } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { PassThrough, Writable } from "node:stream";
 import type Dockerode from "dockerode";
-import { Command, type CommandRunOptions, CommandFinished, startCommand } from "./command.js";
+import type { RawCommand } from "../../runtime/index.js";
+import { startRawCommand, type StartRawCommandOptions } from "./command.js";
 import {
   abortError,
   dockerStatus,
@@ -953,22 +954,12 @@ export class Sandbox {
     await extension;
   }
 
-  runCommand(cmd: string, args?: string[], options?: SignalOptions): Promise<CommandFinished>;
-  runCommand(options: CommandRunOptions & { detached: true }): Promise<Command>;
-  runCommand(options: CommandRunOptions & { detached?: false }): Promise<CommandFinished>;
-  async runCommand(
-    cmdOrOptions: string | CommandRunOptions,
-    args: string[] = [],
-    stringOptions: SignalOptions = {},
-  ): Promise<Command | CommandFinished> {
-    const options: CommandRunOptions = typeof cmdOrOptions === "string"
-      ? { cmd: cmdOrOptions, args, ...stringOptions }
-      : cmdOrOptions;
+  async startRawCommand(options: StartRawCommandOptions): Promise<RawCommand> {
     throwIfAborted(options.signal);
-    if (options.cmd.length === 0 || options.cmd.includes("\0")) {
+    if (options.cmd.length === 0 || options.cmd[0]?.length === 0 || options.cmd[0]?.includes("\0")) {
       throw new TypeError("Command name must be non-empty and cannot contain NUL bytes.");
     }
-    const cwd = resolveContainerPath(options.cwd ?? WORKSPACE);
+    const cwd = resolveContainerPath(options.cwd);
     const container = await this.#ensureRunning();
     const info = await container.inspect();
     const environment = new Map<string, string>();
@@ -976,18 +967,17 @@ export class Sandbox {
       const separator = entry.indexOf("=");
       if (separator >= 0) environment.set(entry.slice(0, separator), entry.slice(separator + 1));
     }
-    for (const [key, value] of Object.entries(options.env ?? {})) environment.set(key, value);
-    const command = await startCommand(this.#docker, container, {
-      cmd: [options.cmd, ...(options.args ?? [])],
+    for (const entry of options.env) {
+      const separator = entry.indexOf("=");
+      if (separator >= 0) environment.set(entry.slice(0, separator), entry.slice(separator + 1));
+    }
+    return startRawCommand(this.#docker, container, {
+      cmd: options.cmd,
       cwd,
       env: [...environment].map(([key, value]) => `${key}=${value}`),
       ...(options.user === undefined ? {} : { user: options.user }),
-      ...(options.stdout === undefined ? {} : { stdout: options.stdout }),
-      ...(options.stderr === undefined ? {} : { stderr: options.stderr }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
-    if (options.detached === true) return command;
-    return command.wait(options.signal === undefined ? {} : { signal: options.signal });
   }
 
   async stop(options: SignalOptions = {}): Promise<void> {

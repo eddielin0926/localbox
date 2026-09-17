@@ -3,59 +3,17 @@ import { StringDecoder } from "node:string_decoder";
 import { Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import type Dockerode from "dockerode";
+import type {
+  ProcessSignal,
+  RawCommand,
+  RawCommandEvent,
+} from "../../runtime/index.js";
 import {
   abortError,
   rawExec,
   throwIfAborted,
   translateDockerError,
 } from "./docker.js";
-
-export type CommandOutput = "stdout" | "stderr" | "both";
-
-export interface CommandChunk {
-  stream: "stdout" | "stderr";
-  data: string;
-}
-
-export interface CommandOptions {
-  signal?: AbortSignal;
-}
-
-export interface CommandRunOptions {
-  cmd: string;
-  args?: string[];
-  cwd?: string;
-  env?: Record<string, string>;
-  user?: string;
-  detached?: boolean;
-  stdout?: Writable;
-  stderr?: Writable;
-  signal?: AbortSignal;
-}
-
-export type CommandLogIterator = AsyncGenerator<CommandChunk, void, void> & Disposable & {
-  close(): void;
-};
-
-export type Signal =
-  | "SIGHUP"
-  | "SIGINT"
-  | "SIGQUIT"
-  | "SIGKILL"
-  | "SIGTERM"
-  | "SIGCONT"
-  | "SIGSTOP"
-  | number;
-
-const PORTABLE_SIGNALS = new Set<Exclude<Signal, number>>([
-  "SIGHUP",
-  "SIGINT",
-  "SIGQUIT",
-  "SIGKILL",
-  "SIGTERM",
-  "SIGCONT",
-  "SIGSTOP",
-]);
 
 const COMMAND_WRAPPER = String.raw`
 import { spawn } from "node:child_process";
@@ -84,284 +42,200 @@ if (signal) {
 }
 `;
 
-interface CommandState {
-  docker: Dockerode;
-  container: Dockerode.Container;
-  exec: Dockerode.Exec;
-  cmdId: string;
-  pidPath: string;
+/** @internal */
+export interface StartRawCommandOptions {
+  cmd: string[];
   cwd: string;
-  startedAt: number;
-  chunks: CommandChunk[];
-  followers: Set<() => void>;
-  completion: Promise<CommandFinished>;
-  resolveCompletion: (result: CommandFinished) => void;
-  rejectCompletion: (error: unknown) => void;
-  exitCode: number | null;
-  durationMs: number | undefined;
-  settled: boolean;
-  finished: CommandFinished | undefined;
-  instances: Set<Command>;
+  env: string[];
+  user?: string;
+  signal?: AbortSignal;
 }
 
-function collectOutput(state: CommandState, stream: CommandOutput): string {
-  if (stream === "both") return state.chunks.map((chunk) => chunk.data).join("");
-  return state.chunks
-    .filter((chunk) => chunk.stream === stream)
-    .map((chunk) => chunk.data)
-    .join("");
-}
+class DockerRawCommand implements RawCommand {
+  readonly startedAt: number;
+  readonly events: AsyncIterable<RawCommandEvent>;
+  readonly #docker: Dockerode;
+  readonly #container: Dockerode.Container;
+  readonly #exec: Dockerode.Exec;
+  readonly #pidPath: string;
+  readonly #queuedEvents: RawCommandEvent[] = [];
+  readonly #followers = new Set<() => void>();
+  #closed = false;
+  #closeStream: (() => void) | undefined;
 
-function publish(state: CommandState, stream: "stdout" | "stderr", data: string): void {
-  if (data.length === 0) return;
-  state.chunks.push({ stream, data });
-  for (const wake of state.followers) wake();
-  state.followers.clear();
-}
-
-async function awaitCompletion(
-  state: CommandState,
-  signal: AbortSignal | undefined,
-  onAbort?: () => void,
-): Promise<CommandFinished> {
-  throwIfAborted(signal);
-  if (signal === undefined) return state.completion;
-
-  const deferred = Promise.withResolvers<CommandFinished>();
-  const abort = (): void => {
-    onAbort?.();
-    deferred.reject(abortError());
-  };
-  signal.addEventListener("abort", abort, { once: true });
-  void state.completion.then(deferred.resolve, deferred.reject).finally(() => {
-    signal.removeEventListener("abort", abort);
-  });
-  return deferred.promise;
-}
-
-export class Command {
-  readonly #state: CommandState;
-  durationMs?: number;
-
-  constructor(internalFactory: never) {
-    this.#state = internalFactory as CommandState;
-    this.#state.instances.add(this);
-    if (this.#state.durationMs !== undefined) this.durationMs = this.#state.durationMs;
+  constructor(
+    docker: Dockerode,
+    container: Dockerode.Container,
+    exec: Dockerode.Exec,
+    pidPath: string,
+    stream: NodeJS.ReadWriteStream,
+  ) {
+    this.#docker = docker;
+    this.#container = container;
+    this.#exec = exec;
+    this.#pidPath = pidPath;
+    this.startedAt = Date.now();
+    this.events = this.#iterateEvents();
+    void this.#pump(stream);
   }
 
-  get cmdId(): string {
-    return this.#state.cmdId;
-  }
-
-  get cwd(): string {
-    return this.#state.cwd;
-  }
-
-  get startedAt(): number {
-    return this.#state.startedAt;
-  }
-
-  get exitCode(): number | null {
-    return this.#state.exitCode;
-  }
-
-
-  logs(options: CommandOptions = {}): CommandLogIterator {
-    const iterator = this.#iterateLogs(options);
-    return Object.assign(iterator, {
-      close(): void {
-        void iterator.return(undefined);
-      },
-      [Symbol.dispose](): void {
-        void iterator.return(undefined);
-      },
-    });
-  }
-
-  async wait(options: CommandOptions = {}): Promise<CommandFinished> {
-    if (this.#state.finished !== undefined) return this.#state.finished;
-    return awaitCompletion(this.#state, options.signal, () => {
-      void this.kill("SIGTERM").catch(() => undefined);
-    });
-  }
-
-  async output(stream: CommandOutput = "both", options: CommandOptions = {}): Promise<string> {
-    await awaitCompletion(this.#state, options.signal);
-    return collectOutput(this.#state, stream);
-  }
-
-  async stdout(options: CommandOptions = {}): Promise<string> {
-    return this.output("stdout", options);
-  }
-
-  async stderr(options: CommandOptions = {}): Promise<string> {
-    return this.output("stderr", options);
-  }
-
-  async kill(
-    signal: Signal = "SIGTERM",
-    options: { abortSignal?: AbortSignal } = {},
-  ): Promise<void> {
-    if (typeof signal !== "number" && !PORTABLE_SIGNALS.has(signal)) {
-      throw new TypeError(`Unsupported signal \"${String(signal)}\".`);
-    }
-    throwIfAborted(options.abortSignal);
-    const info = await this.#state.exec.inspect(
-      options.abortSignal === undefined ? undefined : { abortSignal: options.abortSignal },
+  async signal(signal: ProcessSignal, abortSignal?: AbortSignal): Promise<void> {
+    throwIfAborted(abortSignal);
+    const info = await this.#exec.inspect(
+      abortSignal === undefined ? undefined : { abortSignal },
     );
     if (!info.Running) return;
 
     try {
-      await rawExec(this.#state.docker, this.#state.container, {
+      await rawExec(this.#docker, this.#container, {
         cmd: [
           "/bin/sh",
           "-c",
-          'i=0; while [ ! -f \"$1\" ] && [ \"$i\" -lt 100 ]; do sleep 0.01; i=$((i + 1)); done; [ ! -f \"$1\" ] || kill -s \"$2\" \"$(cat \"$1\")\" 2>/dev/null || true',
+          'i=0; while [ ! -f "$1" ] && [ "$i" -lt 100 ]; do sleep 0.01; i=$((i + 1)); done; [ ! -f "$1" ] || kill -s "$2" "$(cat "$1")" 2>/dev/null || true',
           "--",
-          this.#state.pidPath,
+          this.#pidPath,
           typeof signal === "number" ? String(signal) : signal.slice(3),
         ],
-        ...(options.abortSignal === undefined ? {} : { signal: options.abortSignal }),
+        ...(abortSignal === undefined ? {} : { signal: abortSignal }),
       });
     } catch (error) {
-      const current = await this.#state.exec.inspect().catch(() => undefined);
+      const current = await this.#exec.inspect().catch(() => undefined);
       if (current !== undefined && !current.Running) return;
       throw error;
     }
   }
 
-  async *#iterateLogs(options: CommandOptions): AsyncGenerator<CommandChunk, void, void> {
-    let cursor = 0;
-    for (;;) {
-      throwIfAborted(options.signal);
-      while (cursor < this.#state.chunks.length) {
-        const chunk = this.#state.chunks[cursor];
-        cursor += 1;
-        if (chunk !== undefined) yield { ...chunk };
-      }
-      if (this.#state.settled) return;
+  async dispose(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#queuedEvents.length = 0;
+    this.#closeStream?.();
+    for (const wake of this.#followers) wake();
+    this.#followers.clear();
+  }
 
+  #publish(event: RawCommandEvent): void {
+    if (this.#closed) return;
+    this.#queuedEvents.push(event);
+    for (const wake of this.#followers) wake();
+    this.#followers.clear();
+  }
+
+  #finish(event: Extract<RawCommandEvent, { type: "complete" | "backend-failure" }>): void {
+    if (this.#closed) return;
+    this.#publish(event);
+    this.#closed = true;
+    for (const wake of this.#followers) wake();
+    this.#followers.clear();
+  }
+
+  async *#iterateEvents(): AsyncGenerator<RawCommandEvent, void, void> {
+    for (;;) {
+      while (this.#queuedEvents.length > 0) {
+        const event = this.#queuedEvents.shift();
+        if (event !== undefined) yield event;
+      }
+      if (this.#closed) return;
       const deferred = Promise.withResolvers<void>();
       const wake = (): void => deferred.resolve();
-      const abort = (): void => deferred.reject(abortError());
-      this.#state.followers.add(wake);
-      options.signal?.addEventListener("abort", abort, { once: true });
+      this.#followers.add(wake);
       try {
-        await deferred.promise;
+        if (this.#queuedEvents.length === 0 && !this.#closed) {
+          await deferred.promise;
+        }
       } finally {
-        this.#state.followers.delete(wake);
-        options.signal?.removeEventListener("abort", abort);
+        this.#followers.delete(wake);
       }
     }
   }
-}
 
-export class CommandFinished extends Command {
-  constructor(internalFactory: never) {
-    super(internalFactory);
-  }
+  async #pump(stream: NodeJS.ReadWriteStream): Promise<void> {
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    const stdoutSink = new Writable({
+      write: (chunk: Buffer, _encoding, callback) => {
+        const data = stdoutDecoder.write(chunk);
+        if (data.length > 0) this.#publish({ type: "stdout", data });
+        callback();
+      },
+    });
+    const stderrSink = new Writable({
+      write: (chunk: Buffer, _encoding, callback) => {
+        const data = stderrDecoder.write(chunk);
+        if (data.length > 0) this.#publish({ type: "stderr", data });
+        callback();
+      },
+    });
+    this.#docker.modem.demuxStream(stream, stdoutSink, stderrSink);
 
-  override get exitCode(): number {
-    return super.exitCode ?? 0;
-  }
-
-  override async wait(): Promise<CommandFinished> {
-    return this;
-  }
-}
-
-/** @internal */
-export interface StartCommandOptions {
-  cmd: string[];
-  cwd: string;
-  env: string[];
-  user?: string;
-  stdout?: Writable;
-  stderr?: Writable;
-  signal?: AbortSignal;
-}
-
-async function pumpCommand(
-  state: CommandState,
-  stream: NodeJS.ReadWriteStream,
-  stdoutTarget?: Writable,
-  stderrTarget?: Writable,
-): Promise<void> {
-  const stdoutDecoder = new StringDecoder("utf8");
-  const stderrDecoder = new StringDecoder("utf8");
-  const stdoutSink = new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      stdoutTarget?.write(chunk);
-      publish(state, "stdout", stdoutDecoder.write(chunk));
-      callback();
-    },
-  });
-  const stderrSink = new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      stderrTarget?.write(chunk);
-      publish(state, "stderr", stderrDecoder.write(chunk));
-      callback();
-    },
-  });
-  state.docker.modem.demuxStream(stream, stdoutSink, stderrSink);
-
-  try {
-    const ended = Promise.withResolvers<void>();
-    let streamEnded = false;
-    const finish = (): void => {
-      if (streamEnded) return;
-      streamEnded = true;
-      cleanup();
-      ended.resolve();
-    };
-    const fail = (error: Error): void => {
-      if (streamEnded) return;
-      streamEnded = true;
-      cleanup();
-      ended.reject(error);
-    };
-    const cleanup = (): void => {
-      stream.off("end", finish);
-      stream.off("close", finish);
-      stream.off("error", fail);
-    };
-    stream.once("end", finish);
-    stream.once("close", finish);
-    stream.once("error", fail);
-    await ended.promise;
-
-    publish(state, "stdout", stdoutDecoder.end());
-    publish(state, "stderr", stderrDecoder.end());
-    let info = await state.exec.inspect();
-    while (info.Running) {
-      await delay(10);
-      info = await state.exec.inspect();
-    }
-    state.exitCode = info.ExitCode ?? 0;
-    state.durationMs = Date.now() - state.startedAt;
-    for (const instance of state.instances) instance.durationMs = state.durationMs;
-    const finished = new CommandFinished(state as never);
-    state.finished = finished;
-    state.resolveCompletion(finished);
-  } catch (error) {
     try {
-      translateDockerError(error);
-    } catch (translated) {
-      state.rejectCompletion(translated);
+      const ended = Promise.withResolvers<void>();
+      let streamEnded = false;
+      const cleanup = (): void => {
+        stream.off("end", finish);
+        stream.off("close", finish);
+        stream.off("error", fail);
+        this.#closeStream = undefined;
+      };
+      const finish = (): void => {
+        if (streamEnded) return;
+        streamEnded = true;
+        cleanup();
+        ended.resolve();
+      };
+      const fail = (error: Error): void => {
+        if (streamEnded) return;
+        streamEnded = true;
+        cleanup();
+        ended.reject(error);
+      };
+      this.#closeStream = finish;
+      stream.once("end", finish);
+      stream.once("close", finish);
+      stream.once("error", fail);
+      await ended.promise;
+
+      const stdout = stdoutDecoder.end();
+      const stderr = stderrDecoder.end();
+      if (stdout.length > 0) this.#publish({ type: "stdout", data: stdout });
+      if (stderr.length > 0) this.#publish({ type: "stderr", data: stderr });
+      let info = await this.#exec.inspect();
+      while (info.Running) {
+        await delay(10);
+        info = await this.#exec.inspect();
+      }
+      this.#finish({
+        type: "complete",
+        exitCode: info.ExitCode ?? 0,
+        finishedAt: Date.now(),
+      });
+    } catch (error) {
+      let translated: unknown = error;
+      try {
+        translateDockerError(error);
+      } catch (candidate) {
+        translated = candidate;
+      }
+      this.#finish({
+        type: "backend-failure",
+        code: "LOCALBOX_DOCKER_COMMAND_FAILURE",
+        message: translated instanceof Error
+          ? translated.message
+          : "The Docker command failed.",
+        retryable: false,
+      });
+    } finally {
+      this.#closeStream?.();
     }
-  } finally {
-    state.settled = true;
-    for (const wake of state.followers) wake();
-    state.followers.clear();
   }
 }
 
 /** @internal */
-export async function startCommand(
+export async function startRawCommand(
   docker: Dockerode,
   container: Dockerode.Container,
-  options: StartCommandOptions,
-): Promise<Command> {
+  options: StartRawCommandOptions,
+): Promise<RawCommand> {
   throwIfAborted(options.signal);
   const pidPath = `/tmp/localbox/command-${randomUUID()}.pid`;
   try {
@@ -384,29 +258,7 @@ export async function startCommand(
       stdin: false,
       ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
     });
-    const completion = Promise.withResolvers<CommandFinished>();
-    const state: CommandState = {
-      docker,
-      container,
-      exec,
-      cmdId: exec.id,
-      pidPath,
-      cwd: options.cwd,
-      startedAt: Date.now(),
-      chunks: [],
-      followers: new Set(),
-      completion: completion.promise,
-      resolveCompletion: completion.resolve,
-      rejectCompletion: completion.reject,
-      exitCode: null,
-      durationMs: undefined,
-      settled: false,
-      finished: undefined,
-      instances: new Set(),
-    };
-    const command = new Command(state as never);
-    void pumpCommand(state, stream, options.stdout, options.stderr);
-    return command;
+    return new DockerRawCommand(docker, container, exec, pidPath, stream);
   } catch (error) {
     if (options.signal?.aborted) throw abortError();
     translateDockerError(error);

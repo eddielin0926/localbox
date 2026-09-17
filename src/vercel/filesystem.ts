@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
 import { posix } from "node:path";
 import type { SandboxClient } from "../runtime/index.js";
@@ -482,9 +481,6 @@ export class FileSystem {
   ): Promise<Buffer> {
     await this.#state.ensureRunning(signal);
     throwIfAborted(signal);
-    const processId = privilegeBridge === undefined
-      ? randomUUID()
-      : `${privilegeBridge.processIdPrefix}${randomUUID()}`;
     const nodeArguments = [
       "--input-type=module",
       "-e",
@@ -498,12 +494,12 @@ export class FileSystem {
     const started = unwrap(await withAbort(this.#state.client.startCommand({
       ...mutationMetadata(),
       sandboxId: this.#state.sandboxId,
-      processId,
       command: {
         command: privilegeBridge?.nodePath ?? "node",
         arguments: nodeArguments,
         cwd: WORKSPACE,
         environment: {},
+        ...(privilegeBridge === undefined ? {} : { user: "0" }),
       },
       outputLimitBytes: 16 * 1024 * 1024,
     }), signal));
