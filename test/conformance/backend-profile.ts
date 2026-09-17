@@ -638,15 +638,17 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
     });
 
     profileTest(harness, ["sandbox.persistence"], "sandbox deadlines extend idempotently and expire", async (context) => {
-      const sandboxId = await createSandbox(harness, context, "deadline", ["sandbox.persistence"], {
-        persistent: true,
-        timeoutMs: 3_000,
-      });
-      const initial = unwrap(await context.client.getSandbox({
-        ...mutationMetadata(`deadline-get:${sandboxId}`),
+      const sandboxId = harness.uniqueSandboxName("deadline");
+      context.sandboxIds.add(sandboxId);
+      const initial = unwrap(await context.client.createSandbox(createRequest(
+        harness,
         sandboxId,
-        resume: false,
-      })).sandbox;
+        ["sandbox.persistence"],
+        {
+          persistent: true,
+          timeoutMs: 3_000,
+        },
+      ))).sandbox;
       expect(initial.expiresAt).not.toBeNull();
       const extensionMetadata = mutationMetadata(`extend:${sandboxId}`);
       const extended = unwrap(await context.client.extendSandboxDeadline({
