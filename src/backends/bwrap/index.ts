@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, lstat, readFile, readlink, realpath, stat } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, readlink, realpath, stat } from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { FILESYSTEM_TRANSFER_CHUNK_BYTES } from "../../runtime/filesystem-bridge.js";
@@ -420,6 +420,7 @@ export class BwrapBackend implements SandboxBackend {
         input,
         description: "bubblewrap command",
         failureCode: "LOCALBOX_BWRAP_SUPERVISOR_FAILURE",
+        signalProcessOnly: true,
       }, () => {
         const commands = this.#commands.get(request.sandboxId);
         commands?.delete(raw);
@@ -459,7 +460,14 @@ export class BwrapBackend implements SandboxBackend {
     const args = await this.#namespaceArguments(policy);
     if (workspace !== null) {
       await this.#validateBindSource(workspace, "workspace", true);
-      args.push("--dir", "/vercel", "--bind", workspace, VIRTUAL_WORKSPACE);
+      const privateTmp = join(dirname(workspace), "tmp");
+      await mkdir(privateTmp, { recursive: true, mode: 0o700 });
+      await this.#validateBindSource(privateTmp, "sandbox temporary directory", true);
+      args.push(
+        "--dir", "/vercel",
+        "--bind", workspace, VIRTUAL_WORKSPACE,
+        "--bind", privateTmp, "/tmp",
+      );
     }
     args.push("--chdir", cwd, "--clearenv");
     const nodeBin = dirname(await realpath(process.execPath));
@@ -472,7 +480,7 @@ export class BwrapBackend implements SandboxBackend {
       ...environment,
     };
     for (const [key, value] of Object.entries(sandboxEnvironment)) args.push("--setenv", key, value);
-    args.push("--", command.command, ...command.arguments);
+    args.push("--", "/usr/bin/env", "--", command.command, ...command.arguments);
     return args;
   }
 

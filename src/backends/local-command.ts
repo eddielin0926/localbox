@@ -19,6 +19,7 @@ export interface LocalCommandLaunch {
   readonly input: Buffer | null;
   readonly description: string;
   readonly failureCode: string;
+  readonly signalProcessOnly?: boolean;
 }
 
 interface SupervisorMessage {
@@ -83,6 +84,7 @@ export class LocalRawCommand implements RawCommand {
   readonly #onDisposed: () => void;
   readonly #description: string;
   readonly #failureCode: string;
+  readonly #signalProcessOnly: boolean;
   #targetPid: number | null = null;
   #settled = false;
   #disposed: Promise<void> | undefined;
@@ -92,6 +94,7 @@ export class LocalRawCommand implements RawCommand {
     this.#onDisposed = onDisposed;
     this.#description = launch.description;
     this.#failureCode = launch.failureCode;
+    this.#signalProcessOnly = launch.signalProcessOnly ?? false;
     this.#child = spawn(
       process.execPath,
       ["--input-type=module", "-e", PROCESS_SUPERVISOR_PROGRAM, String(process.pid)],
@@ -159,11 +162,7 @@ export class LocalRawCommand implements RawCommand {
     try {
       const pid = await Promise.race([this.#target.promise, this.#completion.promise.then(() => null), aborted.promise]);
       if (pid === null || this.#settled) return;
-      try {
-        process.kill(-pid, signal);
-      } catch (error) {
-        if (!isErrno(error, "ESRCH")) throw error;
-      }
+      this.#kill(pid, signal);
     } finally {
       abortSignal?.removeEventListener("abort", abort);
     }
@@ -177,28 +176,24 @@ export class LocalRawCommand implements RawCommand {
   async #dispose(): Promise<void> {
     if (!this.#settled) {
       if (this.#child.connected) this.#child.send({ type: "terminate" });
-      if (this.#targetPid !== null) {
-        try {
-          process.kill(-this.#targetPid, "SIGTERM");
-        } catch (error) {
-          if (!isErrno(error, "ESRCH")) throw error;
-        }
-      }
+      if (this.#targetPid !== null) this.#kill(this.#targetPid, "SIGTERM");
       const stopped = await Promise.race([
         this.#completion.promise.then(() => true),
         delay(SUPERVISOR_STOP_TIMEOUT_MS, false, { ref: false }),
       ]);
-      if (!stopped && this.#targetPid !== null) {
-        try {
-          process.kill(-this.#targetPid, "SIGKILL");
-        } catch (error) {
-          if (!isErrno(error, "ESRCH")) throw error;
-        }
-      }
+      if (!stopped && this.#targetPid !== null) this.#kill(this.#targetPid, "SIGKILL");
       if (!this.#child.killed) this.#child.kill("SIGKILL");
     }
     this.#queue.close();
     this.#onDisposed();
+  }
+
+  #kill(pid: number, signal: ProcessSignal): void {
+    try {
+      process.kill(this.#signalProcessOnly ? pid : -pid, signal);
+    } catch (error) {
+      if (!isErrno(error, "ESRCH")) throw error;
+    }
   }
 
   #onMessage(value: unknown): void {
