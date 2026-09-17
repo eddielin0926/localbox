@@ -210,6 +210,16 @@ const AVAILABILITY_CODES: Record<AvailabilityDiagnosticCode, true> = {
   PROCESS_ROOT_INACCESSIBLE: true,
   PROCESS_NODE_UNAVAILABLE: true,
   PROCESS_SUPERVISOR_INVALID: true,
+  BWRAP_PREREQUISITES_AVAILABLE: true,
+  BWRAP_PLATFORM_UNSUPPORTED: true,
+  BWRAP_ROOT_INVALID: true,
+  BWRAP_ROOT_INACCESSIBLE: true,
+  BWRAP_BINARY_NOT_FOUND: true,
+  BWRAP_USER_NAMESPACE_DISABLED: true,
+  BWRAP_APPARMOR_RESTRICTED: true,
+  BWRAP_PERMISSION_DENIED: true,
+  BWRAP_VERSION_INCOMPATIBLE: true,
+  BWRAP_PROBE_FAILED: true,
 };
 
 const DOCKER_AVAILABILITY_REASONS: Partial<Record<AvailabilityDiagnosticCode, string>> = {
@@ -241,10 +251,13 @@ function isAvailabilityDiagnostic(value: unknown): value is AvailabilityDiagnost
       typeof value.message !== "string" || value.message.length === 0 ||
       typeof value.action !== "string" || value.action.length === 0 ||
       !isPlainObject(value.details)) return false;
-  const info = value.code === "DOCKER_DAEMON_AVAILABLE" ||
-    value.code === "PROCESS_PREREQUISITES_AVAILABLE";
-  if (value.severity !== (info ? "info" : "error")) return false;
   const details = value.details;
+  const info = value.code === "DOCKER_DAEMON_AVAILABLE" ||
+    value.code === "PROCESS_PREREQUISITES_AVAILABLE" ||
+    value.code === "BWRAP_PREREQUISITES_AVAILABLE";
+  const warning = value.code === "BWRAP_APPARMOR_RESTRICTED" &&
+    details.type === "bwrap-kernel-policy";
+  if (value.severity !== (info ? "info" : warning ? "warning" : "error")) return false;
   const dockerReason = DOCKER_AVAILABILITY_REASONS[
     value.code as AvailabilityDiagnosticCode
   ];
@@ -253,6 +266,47 @@ function isAvailabilityDiagnostic(value: unknown): value is AvailabilityDiagnost
       details.type === "docker-daemon" &&
       details.reason === dockerReason &&
       (details.apiVersion === null || typeof details.apiVersion === "string");
+  }
+  if (value.code === "BWRAP_PLATFORM_UNSUPPORTED") {
+    return hasExactKeys(details, ["type", "platform"]) &&
+      details.type === "bwrap-platform" && typeof details.platform === "string";
+  }
+  if (value.code === "BWRAP_ROOT_INVALID" || value.code === "BWRAP_ROOT_INACCESSIBLE") {
+    return hasExactKeys(details, ["type", "prerequisite"]) &&
+      details.type === "bwrap-root" &&
+      ["non-symlink", "directory", "read-write-execute"].includes(
+        details.prerequisite as string,
+      );
+  }
+  if (value.code === "BWRAP_BINARY_NOT_FOUND") {
+    return hasExactKeys(details, ["type", "prerequisite"]) &&
+      details.type === "bwrap-binary" && details.prerequisite === "executable";
+  }
+  if (value.code === "BWRAP_VERSION_INCOMPATIBLE" &&
+      details.type === "bwrap-binary") {
+    return hasExactKeys(details, ["type", "prerequisite"]) &&
+      details.prerequisite === "compatible-version";
+  }
+  if (details.type === "bwrap-kernel-policy") {
+    return hasExactKeys(details, ["type", "reason"]) &&
+      ((value.code === "BWRAP_USER_NAMESPACE_DISABLED" &&
+        details.reason === "user-namespace-disabled") ||
+       (value.code === "BWRAP_APPARMOR_RESTRICTED" &&
+        details.reason === "apparmor"));
+  }
+  if (details.type === "bwrap-probe") {
+    const reasons: Partial<Record<AvailabilityDiagnosticCode, readonly string[]>> = {
+      BWRAP_PREREQUISITES_AVAILABLE: ["available"],
+      BWRAP_USER_NAMESPACE_DISABLED: ["user-namespace-disabled"],
+      BWRAP_APPARMOR_RESTRICTED: ["apparmor"],
+      BWRAP_PERMISSION_DENIED: ["permission-denied"],
+      BWRAP_VERSION_INCOMPATIBLE: ["incompatible-arguments"],
+      BWRAP_PROBE_FAILED: ["unknown"],
+    };
+    return hasExactKeys(details, ["type", "reason"]) &&
+      (reasons[value.code as AvailabilityDiagnosticCode] ?? []).includes(
+        details.reason as string,
+      );
   }
   if (value.code === "PROCESS_PLATFORM_UNSUPPORTED") {
     return hasExactKeys(details, ["type", "platform"]) &&

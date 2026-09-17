@@ -671,7 +671,17 @@ export type AvailabilityDiagnosticCode =
   | "PROCESS_ROOT_INVALID"
   | "PROCESS_ROOT_INACCESSIBLE"
   | "PROCESS_NODE_UNAVAILABLE"
-  | "PROCESS_SUPERVISOR_INVALID";
+  | "PROCESS_SUPERVISOR_INVALID"
+  | "BWRAP_PREREQUISITES_AVAILABLE"
+  | "BWRAP_PLATFORM_UNSUPPORTED"
+  | "BWRAP_ROOT_INVALID"
+  | "BWRAP_ROOT_INACCESSIBLE"
+  | "BWRAP_BINARY_NOT_FOUND"
+  | "BWRAP_USER_NAMESPACE_DISABLED"
+  | "BWRAP_APPARMOR_RESTRICTED"
+  | "BWRAP_PERMISSION_DENIED"
+  | "BWRAP_VERSION_INCOMPATIBLE"
+  | "BWRAP_PROBE_FAILED";
 export type AvailabilityDiagnosticDetails =
   | (JsonObject & {
     readonly type: "docker-daemon";
@@ -689,6 +699,32 @@ export type AvailabilityDiagnosticDetails =
   | (JsonObject & {
     readonly type: "process-runtime";
     readonly prerequisite: "node-executable" | "supervisor-program";
+  })
+  | (JsonObject & {
+    readonly type: "bwrap-platform";
+    readonly platform: string;
+  })
+  | (JsonObject & {
+    readonly type: "bwrap-root";
+    readonly prerequisite: "non-symlink" | "directory" | "read-write-execute";
+  })
+  | (JsonObject & {
+    readonly type: "bwrap-binary";
+    readonly prerequisite: "executable" | "compatible-version";
+  })
+  | (JsonObject & {
+    readonly type: "bwrap-kernel-policy";
+    readonly reason: "user-namespace-disabled" | "apparmor";
+  })
+  | (JsonObject & {
+    readonly type: "bwrap-probe";
+    readonly reason:
+      | "available"
+      | "user-namespace-disabled"
+      | "apparmor"
+      | "permission-denied"
+      | "incompatible-arguments"
+      | "unknown";
   });
 export type AvailabilityDiagnostic = JsonObject & {
   readonly code: AvailabilityDiagnosticCode;
@@ -909,3 +945,9 @@ export {
   ProcessBackend,
 } from "../backends/process/index.js";
 export type { ProcessBackendOptions } from "../backends/process/index.js";
+export {
+  BWRAP_CAPABILITIES,
+  BWRAP_VIRTUAL_WORKSPACE,
+  BwrapBackend,
+} from "../backends/bwrap/index.js";
+export type { BwrapBackendOptions } from "../backends/bwrap/index.js";
