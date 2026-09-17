@@ -1,6 +1,6 @@
 {
   "name": "localbox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run cloud sandbox SDKs locally during development with Docker.",
   "license": "MIT",
   "author": "Eddie Lin",
