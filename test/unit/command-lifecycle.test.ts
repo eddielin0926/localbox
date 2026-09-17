@@ -138,7 +138,41 @@ function readRequest(processId: string, cursor: string | null, follow = false) {
   } as const;
 }
 
+
 describe("EmbeddedSandboxClient command lifecycle", () => {
+  test("deduplicates command starts by idempotency key and rejects key reuse for a different mutation", async () => {
+    const raw = new ControlledRawCommand();
+    const implementation = backend(raw);
+    let starts = 0;
+    const originalStart = implementation.startRawCommand.bind(implementation);
+    implementation.startRawCommand = async (request, signal) => {
+      starts += 1;
+      return originalStart(request, signal);
+    };
+    const client = new EmbeddedSandboxClient(implementation);
+    const request = startRequest();
+    const first = await client.startCommand(request);
+    const retry = await client.startCommand({ ...request, requestId: "start-retry" });
+    expect(first).toMatchObject({ ok: true });
+    expect(retry).toEqual(first);
+    expect(starts).toBe(1);
+
+    const conflict = await client.startCommand({
+      ...request,
+      requestId: "start-conflict",
+      command: { ...request.command, arguments: ["different.js"] },
+    });
+    expect(conflict).toMatchObject({
+      ok: false,
+      error: {
+        category: "invalid-request",
+        details: { type: "invalid-request", field: "idempotencyKey" },
+      },
+    });
+    expect(starts).toBe(1);
+    raw.emit({ type: "complete", exitCode: 0, finishedAt: raw.startedAt + 1 });
+  });
+
   test("preserves interleaved order, cursor replay, and follow wakeups", async () => {
     const raw = new ControlledRawCommand();
     const client = new EmbeddedSandboxClient(backend(raw));

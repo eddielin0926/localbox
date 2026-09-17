@@ -26,7 +26,7 @@ A backend owns provider sandbox state and the raw execution mechanism, but not n
 
 ## Command lifecycle and retention
 
-`EmbeddedSandboxClient` assigns every command an opaque process ID and owns the per-sandbox process registry, ordered output chunks, cursors, followers, completion result, waiter fan-out, and idempotent signal-delivery state. Completion is settled once and remains stable for concurrent, repeated, and completion-after-deadline callers. Deleting a sandbox cancels outstanding command waiters, disposes raw backend handles, and removes every process owned by that sandbox.
+`EmbeddedSandboxClient` assigns every command an opaque process ID and owns the per-sandbox process registry, ordered output chunks, cursors, followers, completion result, waiter fan-out, mutation idempotency, and signal-delivery state. Repeating a lifecycle, command, or filesystem mutation with the same idempotency key and payload returns the original outcome without repeating the side effect; reusing that key for a different mutation is rejected. Completion is settled once and remains stable for concurrent, repeated, and completion-after-deadline callers. Deleting a sandbox cancels outstanding command waiters, disposes raw backend handles, and removes every process owned by that sandbox.
 
 Each start request supplies an output byte limit. The runtime retains the first bytes produced, in raw event order across stdout and stderr, until that limit is reached; later output is discarded and the `truncated` flag remains true. Cursors address the retained sequence and never move backward. A follow read at the current cursor waits for the next output event or terminal event, including output discarded after truncation, then returns one current page. This keeps storage bounded while preventing missed or duplicated retained chunks.
 
@@ -42,7 +42,15 @@ Ownership changes use the explicit internal `managed-filesystem-owner` raw-comma
 
 `DockerBackend` is the only Docker boundary. It owns Dockerode construction and values, managed-image resolution, labels, container creation and inspection, persistence and resource settings, network and published-port inspection, watchdog deadlines, source materialization, raw exec creation, bounded stdin attachment, stream demultiplexing, exit inspection, raw signal delivery, cleanup, and Docker failure translation. It does not contain filesystem operation scripts or semantic filesystem APIs. Docker exec IDs, streams, containers, and inspect values remain private. The backend does not allocate neutral process IDs or retain replay output, cursors, followers, waiters, or frontend callbacks.
 
-The Vercel compatibility frontend constructs an `EmbeddedSandboxClient` with a `DockerBackend` explicitly and retains only `SandboxClient` plus neutral records and IDs. It never receives a Docker container, exec, stream, inspect response, error, or buffer from the backend.
+The default Docker composition lives in `src/default-client.ts`. The Vercel compatibility frontend receives a generic `SandboxClient` factory and retains only the client plus neutral records and IDs. Its tests inject a contract-only client; frontend behavior never imports or receives a Docker backend, container, exec, stream, inspect response, error, or identifier.
+
+## Backend conformance profiles
+
+Every advertised backend capability must map to at least one observable behavior profile in `test/conformance/backend-profile.ts`. Registration supplies a `BackendConformanceHarness`: the declared capability strings, a client constructor, a complete valid `SandboxSpec`, unique sandbox-name generation, source fixtures when source capabilities are advertised, and deterministic cleanup. The shared profiles exercise lifecycle and mutation idempotency, command ordering/wait/signal/error behavior, bounded binary and text filesystem pages, endpoint records, request and sandbox deadlines, persistence, sources, networking, resource records, and deletion cleanup.
+
+A profile is skipped only when the harness does not advertise one of its named required capabilities; the skipped test name lists that absent capability. Registration fails coverage when a backend advertises an unknown capability or a known capability has no profile mapping. Each case owns uniquely named resources and invokes harness cleanup from a `finally` path, so profiles are parallel- and full-suite-safe.
+
+To register a future backend, construct it behind its normal `SandboxClient` boundary, publish its immutable capability list, implement the harness methods, provide real source fixtures for advertised source capabilities, and call `registerBackendConformanceProfiles`. Backend-specific mechanism tests may remain beside the registration, but reusable contract expectations belong in the profiles. Docker registers through `EmbeddedSandboxClient` in `test/integration/docker-conformance.test.ts`; the existing Docker integration CI job discovers and runs that file.
 
 ## Error boundary
 
@@ -50,4 +58,4 @@ Valid contract failures returned by a backend retain their category, code, messa
 
 ## Intentional non-goals
 
-This layer does not provide a transport server, RPC protocol, durable runtime state, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, additional provider APIs, or the backend conformance suite tracked by #26. Remote transport remains later M2 work. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
+This layer does not provide a transport server, RPC protocol, durable runtime state beyond current Docker persistence, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, or additional provider APIs. Remote transport remains later M3 work. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).

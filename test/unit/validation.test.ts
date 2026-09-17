@@ -1,9 +1,10 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
+import type { RequestMetadata, SandboxClient } from "../../src/runtime/index.js";
+import { setSandboxClientFactory } from "../../src/vercel/client.js";
 import {
   DockerUnavailableError,
   ImagePullError,
   InvalidSandboxOptionsError,
-  MANAGED_IMAGES,
   PortNotExposedError,
   Sandbox,
   SandboxNotFoundError,
@@ -11,13 +12,36 @@ import {
   UnsupportedSandboxCapabilityError,
 } from "../../src/vercel/index.js";
 import type { SandboxCreateOptions } from "../../src/vercel/types.js";
-import { InvalidSandboxOptionsError as DockerInvalidSandboxOptionsError } from "../../src/backends/docker/errors.js";
-import { resolveSandboxImage } from "../../src/backends/docker/managed-images.js";
-import { dockerContainerName } from "../../src/backends/docker/sandbox.js";
 import { resolveSandboxPath } from "../../src/vercel/filesystem.js";
 
+const rejectingClient = new Proxy({}, {
+  get() {
+    return (request: RequestMetadata) => Promise.resolve({
+      ok: false as const,
+      error: {
+        category: "invalid-request" as const,
+        code: "LOCALBOX_INVALID_REQUEST",
+        message: "The client rejected invalid sandbox options.",
+        retryable: false,
+        requestId: request.requestId,
+        backend: { backendId: "validation", backendType: "test" },
+        details: {
+          type: "invalid-request" as const,
+          field: null,
+          reason: "The client rejected invalid sandbox options.",
+        },
+      },
+    });
+  },
+}) as SandboxClient;
+
+afterEach(() => {
+  setSandboxClientFactory(null);
+});
+
 describe("sandbox option validation", () => {
-  test("rejects invalid create options before contacting Docker", async () => {
+  test("translates frontend and client-boundary validation failures consistently", async () => {
+    setSandboxClientFactory(() => rejectingClient);
     const invalidOptions = [
       { name: "   " },
       { name: "x".repeat(129) },
@@ -50,7 +74,8 @@ describe("sandbox option validation", () => {
     }
   });
 
-  test("rejects unsupported upstream capabilities before contacting Docker", async () => {
+  test("rejects unsupported upstream capabilities before constructing a client", async () => {
+    setSandboxClientFactory(() => { throw new Error("client factory must not be called"); });
     const unsupportedOptions = [
       { source: { type: "snapshot", snapshotId: "snap_123" } },
       { mounts: { "/data": { drive: "drive_123", mode: "read-write" } } },
@@ -67,37 +92,11 @@ describe("sandbox option validation", () => {
     }
   });
 
-  test("resolves managed image aliases without rewriting custom OCI images", () => {
-    expect(resolveSandboxImage({})).toBe(MANAGED_IMAGES.universal);
-    expect(resolveSandboxImage({ runtime: "node24" })).toBe(MANAGED_IMAGES.node24);
-    expect(resolveSandboxImage({ image: "vercel/sandbox/node:22" })).toBe(MANAGED_IMAGES.node22);
-    expect(resolveSandboxImage({ image: "vcr.vercel.com/vercel/sandbox/python:3.14" })).toBe(
-      MANAGED_IMAGES.python314,
-    );
-    expect(resolveSandboxImage({ image: "registry.example.test/team/image:v1" })).toBe(
-      "registry.example.test/team/image:v1",
-    );
-    expect(() => resolveSandboxImage({ image: "vercel/sandbox/node:999" })).toThrow(
-      DockerInvalidSandboxOptionsError,
-    );
-  });
-
-  test("derives stable collision-resistant Docker names", () => {
-    const first = dockerContainerName("My Sandbox / One");
-    const same = dockerContainerName("My Sandbox / One");
-    const different = dockerContainerName("My Sandbox / Two");
-
-    expect(first).toBe(same);
-    expect(first).toMatch(/^localbox-my-sandbox-one-[a-f0-9]{12}$/);
-    expect(different).not.toBe(first);
-  });
-
   test("resolves sandbox paths and rejects NUL bytes", () => {
     expect(resolveSandboxPath("a/../b.txt")).toBe("/vercel/sandbox/b.txt");
     expect(resolveSandboxPath("/tmp/file")).toBe("/tmp/file");
     expect(() => resolveSandboxPath("bad\0path")).toThrow(/NUL/);
   });
-
 
   test("public errors provide corrective actions without daemon response text", () => {
     expect(new DockerUnavailableError(new Error("raw body")).message).toBe(
