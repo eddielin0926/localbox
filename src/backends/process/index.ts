@@ -49,6 +49,7 @@ import {
   type StopSandboxResult,
 } from "../../runtime/index.js";
 import { LocalRawCommand } from "../local-command.js";
+import { PROCESS_SUPERVISOR_PROGRAM } from "./supervisor.js";
 
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -187,23 +188,24 @@ interface ProcessBackendOptions {
   /** Stable identity used to allow multiple independent instances below one root. */
   readonly instanceId: string;
 }
+class BackendOperationError extends Error {
+  constructor(
+    readonly category: ClientFailure["error"]["category"],
+    readonly code: string,
+    message: string,
+    readonly details: ClientFailure["error"]["details"],
+    readonly retryable = false,
+  ) {
+    super(message);
+  }
+}
+
 
 
 function isErrno(error: unknown, code: string): boolean {
   return error !== null && typeof error === "object" && "code" in error && error.code === code;
 }
 
-function isSupervisorMessage(value: unknown): value is SupervisorMessage {
-  if (value === null || typeof value !== "object" || !("type" in value) || typeof value.type !== "string") return false;
-  const message = value as Record<string, unknown>;
-  return (message.pid === undefined || Number.isSafeInteger(message.pid)) &&
-    (message.stream === undefined || message.stream === "stdout" || message.stream === "stderr") &&
-    (message.data === undefined || typeof message.data === "string") &&
-    (message.code === undefined || typeof message.code === "string") &&
-    (message.message === undefined || typeof message.message === "string") &&
-    (message.exitCode === undefined || Number.isFinite(message.exitCode)) &&
-    (message.finishedAt === undefined || Number.isFinite(message.finishedAt));
-}
 
 function hash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");

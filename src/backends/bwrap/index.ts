@@ -940,7 +940,7 @@ function runProcess(command: string, arguments_: readonly string[]): Promise<Pro
   return deferred.promise;
 }
 
-function minimalHostEnvironment(): NodeJS.ProcessEnv {
+function minimalHostEnvironment(): Readonly<Record<string, string>> {
   return {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     LANG: "C.UTF-8",
