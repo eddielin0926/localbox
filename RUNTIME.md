@@ -16,6 +16,18 @@ The `localbox/runtime` entry point defines the backend-neutral values exchanged 
 
 The asynchronous `SandboxClient` covers the behavior required by the current Vercel frontend: create/get/list/stop/delete and deadline extension; command start/wait/bounded output and portable signal delivery; file read/write and recursive directory creation; and resolution of a declared port to its loopback HTTP endpoint. The Vercel adapter remains responsible for provider conveniences such as generated names, callbacks, `Date` and `Buffer` conversion, async pagination, request cancellation, and blocking-versus-detached command behavior.
 
+## Embedded construction
+
+`EmbeddedSandboxClient` is constructed with exactly one `SandboxBackend` instance and remains bound to it. A `null` backend in a create request uses that injected instance; a non-null reference must match its stable ID and type. Applications that need multiple backends construct multiple clients, so selection never depends on a default, registry, singleton, or mutable global state.
+
+## Backend responsibility
+
+A backend owns sandbox and process state and implements the full client operation surface. It exposes a data-only reference and an immutable capability advertisement. The embedded client compares requested backend identity and capabilities before calling `createSandbox`; unmet requirements produce one structured failure and no creation side effect. Other requests, including request IDs, idempotency keys, and absolute deadlines, are passed to the selected backend unchanged.
+
+## Error boundary
+
+Valid contract failures returned by a backend retain their category, code, message, retryability, backend identity, and structured details. Thrown values, malformed results, request-ID mismatches, and non-JSON values become a stable `LOCALBOX_BACKEND_FAILURE` envelope for the current operation. Backend errors, stacks, handles, class instances, and other implementation values never cross the client boundary.
+
 ## Intentional non-goals
 
-This contract does not implement an embedded runtime, Docker backend, transport server, RPC protocol, persistence, backend capability discovery, reconnection, live log streaming, transport-level cancellation, provider SDK types, or additional filesystem operations. Those behaviors require later M2 work or a demonstrated transport-neutral contract extension. It also does not change the development interception rules in [INTERCEPTION.md](INTERCEPTION.md).
+This layer does not provide a Docker backend, command or file storage engine, transport server, RPC protocol, persistence, dynamic backend discovery, reconnection, live log streaming, transport-level cancellation, provider SDK types, or additional filesystem operations. It does not select a backend globally, migrate the Vercel frontend, or change existing frontend behavior. Those behaviors require later M2 work or a demonstrated transport-neutral contract extension. It also does not change the development interception rules in [INTERCEPTION.md](INTERCEPTION.md).
