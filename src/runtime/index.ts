@@ -457,3 +457,14 @@ export interface SandboxClient {
 
   getEndpoint(request: GetEndpointRequest): Promise<ClientResult<GetEndpointResult>>;
 }
+
+/**
+ * In-process execution port. Implementations own sandbox state and advertise
+ * the semantics they can satisfy before creation.
+ */
+export interface SandboxBackend extends SandboxClient {
+  readonly reference: BackendReference;
+  readonly capabilities: readonly SandboxCapability[];
+}
+
+export { EmbeddedSandboxClient } from "./embedded.js";
