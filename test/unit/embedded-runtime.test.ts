@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { EmbeddedSandboxClient } from "../../src/runtime/index.js";
 import type {
@@ -164,34 +167,39 @@ function listRequest(requestId: string) {
 
 describe("EmbeddedSandboxClient", () => {
   test("keeps coexisting backend instances isolated", async () => {
-    const firstReference = { backendId: "first", backendType: "memory" } as const;
-    const secondReference = { backendId: "second", backendType: "memory" } as const;
-    const first = new EmbeddedSandboxClient(createMemoryBackend(firstReference));
-    const second = new EmbeddedSandboxClient(createMemoryBackend(secondReference));
+    const stateRoot = await mkdtemp(join(tmpdir(), "localbox-embedded-runtime-"));
+    try {
+      const firstReference = { backendId: "first", backendType: "memory" } as const;
+      const secondReference = { backendId: "second", backendType: "memory" } as const;
+      const first = new EmbeddedSandboxClient(createMemoryBackend(firstReference), { stateRoot });
+      const second = new EmbeddedSandboxClient(createMemoryBackend(secondReference), { stateRoot });
 
-    const firstCreate = await first.createSandbox(
-      createRequest("create-first", "shared-id", "first-sandbox"),
-    );
-    const secondCreate = await second.createSandbox(
-      createRequest("create-second", "shared-id", "second-sandbox"),
-    );
-    expect(firstCreate.ok).toBe(true);
-    expect(secondCreate.ok).toBe(true);
+      const firstCreate = await first.createSandbox(
+        createRequest("create-first", "shared-id", "first-sandbox"),
+      );
+      const secondCreate = await second.createSandbox(
+        createRequest("create-second", "shared-id", "second-sandbox"),
+      );
+      expect(firstCreate.ok).toBe(true);
+      expect(secondCreate.ok).toBe(true);
 
-    const firstList = await first.listSandboxes(listRequest("list-first"));
-    const secondList = await second.listSandboxes(listRequest("list-second"));
-    expect(firstList).toMatchObject({
-      ok: true,
-      value: {
-        sandboxes: [{ name: "first-sandbox", backend: firstReference }],
-      },
-    });
-    expect(secondList).toMatchObject({
-      ok: true,
-      value: {
-        sandboxes: [{ name: "second-sandbox", backend: secondReference }],
-      },
-    });
+      const firstList = await first.listSandboxes(listRequest("list-first"));
+      const secondList = await second.listSandboxes(listRequest("list-second"));
+      expect(firstList).toMatchObject({
+        ok: true,
+        value: {
+          sandboxes: [{ name: "first-sandbox", backend: firstReference }],
+        },
+      });
+      expect(secondList).toMatchObject({
+        ok: true,
+        value: {
+          sandboxes: [{ name: "second-sandbox", backend: secondReference }],
+        },
+      });
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
   });
 
   test("rejects backend mismatches and unsupported requirements before creation", async () => {

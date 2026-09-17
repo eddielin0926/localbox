@@ -35,7 +35,7 @@ Create requirements are a discriminated union. Every requirement names its domai
 3. Compare the support classification before domain constraints. `unsupported` always fails; a supported classification must appear in `acceptableSupport`.
 4. Compare domain constraints in the requirement's field order and return at most one ordered issue per requirement, with the backend diagnostic attached.
 
-`EmbeddedSandboxClient.createSandbox` performs backend-reference matching and the complete negotiation before registering the idempotency mutation or invoking `backend.createSandbox`. A failed preflight therefore starts no backend create, raw command, filesystem transfer, or other allocation. Valid retries retain the existing idempotency behavior; rejected retries are recomputed from immutable input and produce the same ordered issues with the current request ID.
+`EmbeddedSandboxClient.createSandbox` performs backend-reference matching and the complete negotiation before registering the idempotency mutation, claiming the sandbox name, or invoking `backend.createSandbox`. A failed preflight therefore starts no state mutation, backend create, raw command, filesystem transfer, or other allocation. Valid retries retain the existing in-process idempotency behavior; rejected retries are recomputed from immutable input and produce the same ordered issues with the current request ID.
 
 ## Current operation surface
 
@@ -43,7 +43,43 @@ The asynchronous `SandboxClient` covers the behavior required by the current Ver
 
 ## Embedded construction
 
-`EmbeddedSandboxClient` is constructed with exactly one `SandboxBackend` instance and remains bound to it. A `null` backend in a create request uses that injected instance; a non-null reference must match its stable ID and type. Applications that need multiple backends construct multiple clients, so selection never depends on a default, registry, singleton, or mutable global state.
+`EmbeddedSandboxClient` is constructed with exactly one `SandboxBackend` instance and remains bound to it. A `null` backend in a create request uses that injected instance; a non-null reference must match its stable ID and type. Applications that need multiple backends construct multiple clients, so selection never depends on a default, registry, singleton, or mutable global state. The constructor accepts either an explicit absolute state root or a preconstructed `LocalSandboxStateStore`; the default composition supplies the platform-resolved state root.
+
+## Local state and sandbox-name ownership
+
+`resolveLocalStateRoot` uses `$XDG_STATE_HOME/localbox` only when `XDG_STATE_HOME` is an absolute path, as required by the XDG Base Directory specification. An unset, empty, or relative value is ignored and falls back to `<homedir>/.local/state/localbox`. An explicit constructor override must also be absolute. This injection point isolates tests and permits multiple runtime instances to share or intentionally separate ownership domains.
+
+The schema-v1 layout is:
+
+```text
+<state-root>/                         0700
+  sandboxes/                          0700
+    <sha256(UTF-8 sandbox name)>/     0700, atomic ownership claim
+      state.json                      0600, canonical claim or active record
+      .state.<random>.tmp             0600, incomplete write; never read as state
+      .operation/                     0700, short-lived serialized mutation lock
+        owner.json                    0600, lock owner metadata for crash recovery
+```
+
+The digest is the complete lowercase SHA-256 value, so arbitrary sandbox names never become path components. The canonical record retains the original name, configured backend reference, an unguessable ownership token, creator PID/process nonce/start timestamp, and claim/update timestamps. A committed active record additionally embeds the complete backend-neutral `SandboxRecord` and activation timestamp. It never stores backend handles, command buffers, process output, environment variables, source credentials, or provider objects.
+
+Name ownership is global within one state root and independent of backend object or process. Acquisition uses an atomic directory creation; there is no check-then-write path. Capability/backend preflight runs first, then creation acquires the claim before backend allocation. Backend success commits the observed record. Backend failure releases only the caller's token; an already-existing backend resource is first observed and recorded for pre-v0.4 Docker compatibility. Get, list, stop, resume, and deadline extension refresh the active record. Successful deletion verifies the token and releases ownership. Every commit, update, and release re-reads and compares the token while holding the entry's filesystem operation lock, so a delayed operation cannot remove or overwrite a successor claim.
+
+Canonical writes use a unique same-directory temporary file, a complete write, file `fsync`, close, atomic rename, and parent-directory `fsync` where the host supports directory synchronization. Temporary files are ignored during reads and removed under the operation lock. Readers accept only bounded regular files containing schema-v1 JSON with the complete expected shape; malformed, partial, version-mismatched, name/digest-mismatched, or non-JSON data is never coerced into metadata. Directory `fsync` is best-effort on hosts that reject it, so the strongest crash guarantee depends on filesystem and operating-system rename/flush semantics.
+
+Conflict and cleanup reconciliation is conservative:
+
+| State entry | Backend probe | Decision |
+| --- | --- | --- |
+| Active record or dead creator claim | Live resource | Preserve ownership, refresh/commit the record, reject the competing create |
+| Missing metadata (including a pre-v0.4 Docker resource) | Live resource | Adopt the observed neutral record; get/list remain discoverable and a colliding create is rejected |
+| Dead creator or stale active record | Confirmed `not-found` | Token-verified release, then retry acquisition |
+| Empty/interrupted or corrupt entry | Live resource | Repair with a new token and the observed record, then reject the competing create |
+| Old empty/interrupted or corrupt entry | Confirmed `not-found` | Atomically quarantine/remove the invalid entry, then retry acquisition |
+| Any entry | Backend unavailable, timeout, malformed result, or unknown failure | Preserve ownership and fail closed |
+| Claim whose PID still exists, including possible PID reuse | Confirmed `not-found` | Preserve the claim; liveness ambiguity is never treated as proof of death |
+
+An empty claim directory receives a short grace period because it can be observed between atomic directory creation and the durable claim write. Explicit cleanup and later conflicting creates can reclaim it only after the backend confirms absence. The store is local coordination, not a distributed lease: copying or sharing the state directory across hosts is unsupported. State names, tags, backend identity, PIDs, and endpoint metadata may be sensitive; the private modes limit access to the owning account, but operators should protect and avoid publishing the state root.
 
 ## Backend responsibility
 
@@ -71,11 +107,11 @@ Docker is a shared-kernel container backend for trusted or single-tenant local d
 
 Networking is partial: bridge `allow-all` and network-none `deny-all` are available, published HTTP ports are loopback-only, and custom policies are unsupported. A deny-all sandbox with a Git or tarball source has network access during source materialization and is disconnected afterward. Resources are partial: Docker hard-enforces integer NanoCPU quotas and memory at exactly 2 GiB per vCPU, with no independent memory setting or host-capacity guarantee. Interactive PTYs and snapshot operations are explicitly unsupported. These classifications do not claim the future boot-artifact model.
 
-The default Docker composition lives in `src/default-client.ts`. The Vercel compatibility frontend receives a generic `SandboxClient` factory and retains only the client plus neutral records and IDs. Its create requests require the operational command/filesystem surface, selected source and endpoint operations, accepted artifact kinds, requested persistence, selected network policy, and requested resource values. It accepts native, emulated, or partial implementations because those classifications preserve the released local v0.3 behavior; unsupported snapshot, mount, retention, and custom cloud/network options continue to fail before client allocation.
+The default Docker composition lives in `src/default-client.ts` and accepts an explicit absolute state-root override while otherwise following XDG resolution. The Vercel compatibility frontend receives a generic `SandboxClient` factory and retains only the client plus neutral records and IDs. Its create requests require the operational command/filesystem surface, selected source and endpoint operations, accepted artifact kinds, requested persistence, selected network policy, and requested resource values. It accepts native, emulated, or partial implementations because those classifications preserve the released local v0.3 behavior; unsupported snapshot, mount, retention, and custom cloud/network options continue to fail before client allocation.
 
 ## Backend conformance profiles
 
-Every operational capability key must map to at least one observable behavior profile in `test/conformance/backend-profile.ts`, and every domain has an explicit coverage mapping. Registration supplies a `BackendConformanceHarness`: the complete capability record, a client constructor, a complete valid `SandboxSpec`, unique sandbox-name generation, source fixtures when source operations are supported, and deterministic cleanup. The shared profiles exercise lifecycle and mutation idempotency, command ordering/wait/signal/error behavior, bounded binary and text filesystem pages, endpoint records, request and sandbox deadlines, persistence, sources, networking, resource records, and deletion cleanup.
+Every operational capability key must map to at least one observable behavior profile in `test/conformance/backend-profile.ts`, and every domain has an explicit coverage mapping. Registration supplies a `BackendConformanceHarness`: the complete capability record, a client constructor, an optional peer client sharing the same state root, a complete valid `SandboxSpec`, unique sandbox-name generation, source fixtures when source operations are supported, and deterministic cleanup. The shared profiles exercise lifecycle and mutation idempotency, cross-runtime sandbox-name ownership, command ordering/wait/signal/error behavior, bounded binary and text filesystem pages, endpoint records, request and sandbox deadlines, persistence, sources, networking, resource records, and deletion cleanup.
 
 A profile declares typed requirements and runs when every required capability is native, emulated, or partial in one of its explicitly accepted classes. It skips only an explicitly `unsupported` entry; a malformed advertisement, unknown key, missing key, unprofiled key, unacceptable supported class, or constraint mismatch fails instead of silently skipping. Each case owns uniquely named resources and invokes harness cleanup from a `finally` path, so profiles are parallel- and full-suite-safe.
 
@@ -87,4 +123,4 @@ Valid contract failures returned by a backend retain their category, code, messa
 
 ## Intentional non-goals
 
-This layer does not provide a transport server, RPC protocol, durable runtime state beyond current Docker persistence, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, or additional provider APIs. Process, bwrap, and Podman backends and a remote service or control plane remain deferred to later milestones. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
+This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, or additional provider APIs. Process, bwrap, and Podman backends and a remote service or control plane remain deferred to later milestones. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).

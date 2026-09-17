@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll } from "vitest";
 import { DockerBackend } from "../../src/backends/docker/index.js";
 import { EmbeddedSandboxClient } from "../../src/runtime/embedded.js";
 import type { SandboxSpec } from "../../src/runtime/index.js";
@@ -10,6 +14,11 @@ import {
 const TARBALL_SOURCE =
   "data:application/gzip;base64,H4sIAAAAAAACA+3NQQqDMBSE4bf2FJ5AniXoeYJNIaAI8QXE05u6KXSvCP7fZobZzCeullNobDU5ixadc0cW/6n6cr/+3Vtte5Va5QJ5MZ/KvTzTMuc0hHryFlL0Y9zCuxIAAAAAAAAAAAAAAAAAwO3t6qbNcwAoAAA=";
 const capabilities = new DockerBackend().capabilities;
+const stateRoot = mkdtempSync(join(tmpdir(), "localbox-docker-conformance-"));
+
+afterAll(() => {
+  rmSync(stateRoot, { recursive: true, force: true });
+});
 
 const dockerHarness: BackendConformanceHarness = {
   name: "Docker through EmbeddedSandboxClient",
@@ -25,7 +34,10 @@ const dockerHarness: BackendConformanceHarness = {
     tarball: { type: "tarball", url: TARBALL_SOURCE },
   },
   createClient() {
-    return new EmbeddedSandboxClient(new DockerBackend());
+    return new EmbeddedSandboxClient(new DockerBackend(), { stateRoot });
+  },
+  createPeerClient() {
+    return new EmbeddedSandboxClient(new DockerBackend(), { stateRoot });
   },
   sandboxSpec(name, overrides = {}) {
     const base: SandboxSpec = {

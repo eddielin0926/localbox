@@ -735,6 +735,27 @@ export type SandboxBackend = Pick<
 };
 
 export { EmbeddedSandboxClient } from "./embedded.js";
+export type { EmbeddedSandboxClientOptions } from "./embedded.js";
+export {
+  isLocalStateOwnerAlive,
+  LocalSandboxOwnershipError,
+  LocalSandboxStateConflictError,
+  LocalSandboxStateCorruptionError,
+  LocalSandboxStateError,
+  LocalSandboxStateStore,
+  resolveLocalStateRoot,
+  sandboxNameDigest,
+} from "./local-state.js";
+export type {
+  LocalSandboxActiveRecord,
+  LocalSandboxClaim,
+  LocalSandboxClaimRecord,
+  LocalSandboxStateInspection,
+  LocalSandboxStateRecord,
+  LocalSandboxStateStoreOptions,
+  LocalStateOwner,
+  LocalStateRootOptions,
+} from "./local-state.js";
 export {
   negotiateSandboxRequirements,
   SANDBOX_OPERATIONAL_CAPABILITIES,
