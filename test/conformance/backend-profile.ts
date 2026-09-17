@@ -4,6 +4,7 @@ import type {
   ClientResult,
   CreateSandboxRequest,
   JsonObject,
+  ReadCommandOutputResult,
   SandboxCapability,
   SandboxClient,
   SandboxSource,
@@ -40,15 +41,27 @@ export const BACKEND_CONFORMANCE_COVERAGE = {
   "sandbox.source.tarball": ["tarball source materialization"],
 } as const satisfies Record<SandboxCapability, readonly string[]>;
 
+export type SandboxSpecOverrides = Partial<Pick<
+  SandboxSpec,
+  | "bootSource"
+  | "source"
+  | "persistent"
+  | "timeoutMs"
+  | "environment"
+  | "tags"
+  | "ports"
+  | "networkPolicy"
+  | "resources"
+  | "region"
+  | "failoverRegions"
+>>;
+
 export interface BackendConformanceHarness {
   readonly name: string;
   readonly capabilities: readonly string[];
   readonly sourceFixtures?: Readonly<Partial<Record<"git" | "tarball", SandboxSource>>>;
   createClient(): SandboxClient | Promise<SandboxClient>;
-  sandboxSpec(
-    name: string,
-    overrides?: Partial<Omit<SandboxSpec, "name">>,
-  ): SandboxSpec;
+  sandboxSpec(name: string, overrides?: SandboxSpecOverrides): SandboxSpec;
   uniqueSandboxName(profile: string): string;
   cleanup(client: SandboxClient, sandboxId: string): Promise<void>;
 }
@@ -88,7 +101,7 @@ function createRequest(
   harness: BackendConformanceHarness,
   name: string,
   requirements: readonly SandboxCapability[] = [],
-  overrides: Partial<Omit<SandboxSpec, "name">> = {},
+  overrides: SandboxSpecOverrides = {},
   idempotencyKey = requestId(`key:create:${name}`),
 ): CreateSandboxRequest {
   return {
@@ -141,7 +154,7 @@ async function createSandbox(
   context: ProfileContext,
   profile: string,
   capabilities: readonly SandboxCapability[] = [],
-  overrides: Partial<Omit<SandboxSpec, "name">> = {},
+  overrides: SandboxSpecOverrides = {},
 ): Promise<string> {
   const sandboxId = harness.uniqueSandboxName(profile);
   context.sandboxIds.add(sandboxId);
@@ -162,7 +175,7 @@ async function readAllOutput(
   const text: string[] = [];
   const streams: string[] = [];
   while (!complete) {
-    const page = unwrap(await client.readCommandOutput({
+    const page: ReadCommandOutputResult = unwrap(await client.readCommandOutput({
       ...requestMetadata(`read-output:${processId}`),
       sandboxId,
       processId,
