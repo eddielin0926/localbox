@@ -176,7 +176,7 @@ describe("ProcessBackend", () => {
     try {
       const options = { root: join(root, "backend"), instanceId: "recovery" } as const;
       const client = new EmbeddedSandboxClient(new ProcessBackend(options), { stateRoot: join(root, "state") });
-      unwrap(await client.createSandbox(createRequest(name));
+      unwrap(await client.createSandbox(createRequest(name)));
       unwrap(await client.writeFile({
         ...metadata(`write:${name}`),
         sandboxId: name,
