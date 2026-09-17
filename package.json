@@ -67,9 +67,11 @@
     "test:cli": "vitest run test/package/cli-process-wrapper.test.ts",
     "test:integration": "vitest run test/integration",
     "test:process": "vitest run test/process",
+    "test:bwrap": "vitest run test/bwrap",
     "smoke": "node examples/basic.mjs",
     "smoke:interception": "node scripts/smoke-interception.mjs",
     "smoke:process": "node scripts/smoke-process-backend.mjs",
+    "smoke:bwrap": "node scripts/smoke-bwrap-backend.mjs",
     "compatibility:vercel": "node scripts/report-compatibility.mjs"
   },
   "dependencies": {

@@ -174,6 +174,53 @@ Every command is launched through a small Node supervisor using direct argv and 
 
 The backend requires POSIX process-group semantics. Its constructor retains configuration so `probeAvailability` can report unsupported platforms or invalid roots without mutation; lifecycle operations still fail closed when those prerequisites are absent. Linux is the CI-covered platform; macOS uses the same Node/POSIX primitives but remains a platform caveat until covered by CI. Host commands can read host files, use host credentials, inspect or signal other same-user processes, bind arbitrary ports, and consume unbounded resources. Therefore `ProcessBackend` **must not** run hostile code, untrusted dependencies, or multi-tenant workloads; a caller's artifact trust declaration is not sandboxing. Use a container, namespace sandbox, or VM backend for those cases.
 
+## Linux Bubblewrap namespace backend
+
+`BwrapBackend` is an opt-in Linux backend for trusted or single-tenant local development that needs a stronger boundary than `ProcessBackend` without adopting a Docker image:
+
+```ts
+import { BwrapBackend, EmbeddedSandboxClient } from "localbox/runtime";
+
+const backend = new BwrapBackend({
+  root: "/absolute/private/localbox-bwrap-state",
+  instanceId: "developer-host",
+  // binaryPath: "/usr/bin/bwrap", // optional; otherwise resolved from PATH
+});
+const client = new EmbeddedSandboxClient(backend, {
+  stateRoot: "/absolute/private/localbox-runtime-state",
+});
+```
+
+The absolute normalized root and stable instance ID produce a digest-only backend reference and private instance directory. Multiple Bubblewrap, Process, and Docker instances can coexist; the default client and Vercel interception remain Docker-backed. `BwrapBackend` accepts only the exact trusted, mutable current-host artifact. It rejects directory, OCI, disk-image, and snapshot artifacts, sources, ports/endpoints, regions, hard resources, terminals, snapshots, managed ownership, and alternate users before workspace allocation.
+
+| Capability | Classification | Bubblewrap behavior |
+| --- | --- | --- |
+| Command start | `native` | Direct argv, explicit cwd/environment, and no shell inside a fresh namespace set |
+| Detached command | `emulated` | Embedded command identity plus the shared local process-group supervisor; not restart-recoverable |
+| Filesystem mkdir/read/write | `native` | The neutral bridge runs inside the namespace and sees the writable workspace at `/vercel/sandbox` |
+| Raw stdin | `native` | One binary-safe payload bounded to 1 MiB |
+| Isolation | `native`, level `namespace-sandbox`, tenancy `trusted` or `single-tenant` | New user, mount, PID, IPC, and UTS namespaces; opportunistic cgroup namespace; shared host kernel |
+| Artifacts | `partial` | The exact current-host artifact only |
+| Persistence | `native` | Private workspace and lifecycle descriptor survive stop/resume and backend reconstruction |
+| Recovery | `partial`, scope `sandbox` | Metadata/workspace only; commands, output, waiters, environment overlays, and idempotency state are not recovered |
+| Networking | `native`, modes `allow-all` and `deny-all` | `allow-all` explicitly retains host networking; `deny-all` requires a successfully probed fresh network namespace |
+| Endpoints, sources, managed owner, resources, terminals, snapshots | `unsupported` | Rejected before allocation or command start |
+
+Bubblewrap begins with an empty tmpfs root. Localbox read-only binds the canonical `/usr` runtime plus validated non-merged system runtime directories or merged-`/usr` symlinks. If the running Node executable is outside those trees (for example a CI toolcache), only its resolved version root is read-only bound at the same path; Localbox does not mount its home/toolcache parent or arbitrary `PATH` entries. A small allowlist of resolved certificate, resolver, and host-name files is read-only bound below a freshly created `/etc`. `/proc` is new, `/dev` is minimal, `/tmp`, `/run`, `/home`, and `/root` are private, and the sandbox workspace is the only writable host bind. Localbox never broad-binds `/`, the caller home, repository, backend state root, or sibling workspaces. Bind sources must be canonical regular files/directories, must not overlap private state, and merged-system symlinks must resolve below `/usr`; validation failure aborts before spawn.
+
+Commands use `--die-with-parent` and `--new-session` in addition to the existing supervisor. The supervisor retains ordered UTF-8 events, direct bounded stdin, process-group signals, TERM/KILL escalation, abort/dispose races, and abrupt Localbox-parent cleanup. Bubblewrap supplies a namespace PID 1 and kills namespace descendants if its parent disappears. Stop, delete, deadline expiry, or filesystem cancellation disposes every tracked command before lifecycle cleanup. Persistent stop retains only descriptor/workspace data; deletion removes only the backend-owned digest directory without following a user-controlled path.
+
+Availability probing does not allocate a sandbox. It checks Linux, the private-root prerequisite, executable resolution and `bwrap --version`, readable `max_user_namespaces`, `unprivileged_userns_clone`, and AppArmor restriction policy, then runs real `/usr/bin/true` probes using the same mount and namespace strategy for both `--share-net` and `--unshare-net`. Stable diagnostics distinguish missing binaries, disabled user namespaces, AppArmor restriction, permission/EPERM failures, incompatible arguments/version, root problems, and unknown probe failures. Messages do not include configured roots, PATH entries, environment values, or raw stderr. The supported CI baseline installs the Ubuntu 24.04 distribution `bubblewrap` package and exercises the backend as an ordinary uid inside a privileged job container only because the hosted runner's outer AppArmor policy can otherwise block unprivileged namespace creation.
+
+The mount graph intentionally provides Linux namespace/filesystem isolation, not a complete hostile-code sandbox: Bubblewrap itself documents that its security boundary is determined by the caller's arguments, everything mounted is part of the attack surface, and the host kernel remains shared. Localbox does not compile a seccomp policy or enforce cgroup resources. The threat-model comparison is:
+
+- `ProcessBackend`: trusted host process bookkeeping, **no isolation boundary**.
+- `BwrapBackend`: Linux user/PID/IPC/UTS/mount and optional network namespace isolation with a narrow filesystem, sharing the host kernel.
+- `DockerBackend`: a container boundary with image/rootfs, cgroup, network, and port mechanisms, also sharing the host kernel.
+- None of these is a microVM or a suitable hostile multi-tenant isolation boundary. Use a hardened VM/microVM runtime for adversarial multi-tenancy.
+
+The argument contract follows the upstream Bubblewrap README and the Debian bookworm `bwrap(1)` manual for bubblewrap 0.8.0, including ordered filesystem operations, unprivileged user namespaces, explicit network sharing, PID reaping, `--new-session`, and `--die-with-parent`. Other distribution versions are accepted only when `--version` and the actual namespace probes pass.
+
 ## Backend conformance profiles
 
 Every operational capability key must map to at least one observable behavior profile in `test/conformance/backend-profile.ts`, and every domain has an explicit coverage mapping. Registration supplies a `BackendConformanceHarness`: the complete capability record, a client constructor, an optional peer client sharing the same state root, a complete valid `SandboxSpec`, unique sandbox-name generation, source fixtures when source operations are supported, and deterministic cleanup. The shared profiles exercise lifecycle and mutation idempotency, cross-runtime sandbox-name ownership, command ordering/wait/signal/error behavior, bounded binary and text filesystem pages, endpoint records, request and sandbox deadlines, persistence, sources, networking, resource records, and deletion cleanup.
@@ -188,4 +235,4 @@ Valid contract failures returned by a backend retain their category, code, messa
 
 ## Intentional non-goals
 
-This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote artifact upload/storage, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, automatic prerequisite installation, or additional provider APIs. Directory/disk/snapshot execution, Bubblewrap, Podman, and a remote service or control plane remain deferred. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
+This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote artifact upload/storage, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, automatic prerequisite installation, or additional provider APIs. Directory/disk/snapshot execution, Podman, seccomp policy compilation, cgroup resource enforcement, terminals, microVMs, and a remote service or control plane remain deferred. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
