@@ -25,9 +25,11 @@ import {
 import { homedir as platformHomedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { validateBootArtifact, validateSandboxFrontendMetadata } from "./artifacts.js";
 import type { BackendReference, SandboxRecord } from "./index.js";
 
-const STATE_SCHEMA_VERSION = 1 as const;
+const STATE_SCHEMA_VERSION = 2 as const;
+const LEGACY_STATE_SCHEMA_VERSION = 1 as const;
 const STATE_FILE = "state.json";
 const OPERATION_LOCK = ".operation";
 const LOCK_OWNER_FILE = "owner.json";
@@ -61,12 +63,12 @@ interface OwnershipFields {
 }
 
 export interface LocalSandboxClaimRecord extends OwnershipFields {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly kind: "claim";
 }
 
 export interface LocalSandboxActiveRecord extends OwnershipFields {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly kind: "active";
   readonly activatedAt: number;
   readonly sandbox: SandboxRecord;
@@ -205,10 +207,12 @@ function isJsonCompatible(value: unknown): boolean {
 
 function isSandboxRecord(value: unknown): value is SandboxRecord {
   if (!isPlainObject(value) || !isJsonCompatible(value) || !hasOnlyKeys(value, [
-    "sandboxId", "name", "status", "persistent", "bootSource", "runtime", "backend",
+    "sandboxId", "name", "status", "persistent", "bootArtifact", "frontendMetadata", "backend",
     "createdAt", "updatedAt", "statusUpdatedAt", "expiresAt", "timeoutMs", "tags",
     "ports", "endpoints", "resources", "region", "failoverRegions",
   ])) return false;
+  const artifactValidation = validateBootArtifact(value.bootArtifact);
+  if (!artifactValidation.ok) return false;
   const statuses = ["pending", "running", "stopping", "stopped", "failed"];
   if (typeof value.sandboxId !== "string" || typeof value.name !== "string" ||
       typeof value.status !== "string" || !statuses.includes(value.status) ||
@@ -218,12 +222,11 @@ function isSandboxRecord(value: unknown): value is SandboxRecord {
       !isTimestamp(value.timeoutMs) || !isStringRecord(value.tags) ||
       !Array.isArray(value.ports) || !value.ports.every((port) => Number.isSafeInteger(port)) ||
       !Array.isArray(value.failoverRegions) || !value.failoverRegions.every((region) => typeof region === "string") ||
-      !(value.region === null || typeof value.region === "string") ||
-      !(value.runtime === null || typeof value.runtime === "string")) return false;
-  const bootSource = value.bootSource;
-  if (!isPlainObject(bootSource) ||
-      !((hasOnlyKeys(bootSource, ["type", "runtime"]) && bootSource.type === "runtime" && typeof bootSource.runtime === "string") ||
-        (hasOnlyKeys(bootSource, ["type", "image"]) && bootSource.type === "image" && typeof bootSource.image === "string"))) return false;
+      !(value.region === null || typeof value.region === "string")) return false;
+  if (!validateSandboxFrontendMetadata(
+    value.frontendMetadata,
+    artifactValidation.artifact,
+  ).ok) return false;
   const resources = value.resources;
   if (!isPlainObject(resources) || !hasOnlyKeys(resources, ["vcpus", "memoryBytes"]) ||
       !(resources.vcpus === null || typeof resources.vcpus === "number" && Number.isFinite(resources.vcpus)) ||
@@ -240,6 +243,68 @@ function isSandboxRecord(value: unknown): value is SandboxRecord {
   return true;
 }
 
+function migrateLegacySandboxRecord(value: unknown): SandboxRecord | null {
+  if (!isPlainObject(value) || !isJsonCompatible(value) || !hasOnlyKeys(value, [
+    "sandboxId", "name", "status", "persistent", "bootSource", "runtime", "backend",
+    "createdAt", "updatedAt", "statusUpdatedAt", "expiresAt", "timeoutMs", "tags",
+    "ports", "endpoints", "resources", "region", "failoverRegions",
+  ])) return null;
+  if (value.runtime !== null && typeof value.runtime !== "string") return null;
+  const bootSource = value.bootSource;
+  if (!isPlainObject(bootSource)) return null;
+  let bootArtifact: SandboxRecord["bootArtifact"];
+  let frontendMetadata: SandboxRecord["frontendMetadata"] = null;
+  if (
+    hasOnlyKeys(bootSource, ["type", "runtime"]) &&
+    bootSource.type === "runtime" &&
+    bootSource.runtime === "host" &&
+    value.runtime === "host"
+  ) {
+    bootArtifact = {
+      kind: "host",
+      locator: { type: "host", selector: "current" },
+      trust: "trusted",
+      mutability: "mutable",
+    };
+  } else if (
+    hasOnlyKeys(bootSource, ["type", "image"]) &&
+    bootSource.type === "image" &&
+    typeof bootSource.image === "string"
+  ) {
+    const digestMatch = bootSource.image.match(/@sha256:([a-f0-9]{64})$/);
+    bootArtifact = {
+      kind: "oci-image",
+      locator: { type: "oci-reference", reference: bootSource.image },
+      digest: digestMatch === null
+        ? null
+        : { algorithm: "sha256", value: digestMatch[1]! },
+      trust: "untrusted",
+      mutability: digestMatch === null ? "mutable" : "immutable",
+      platform: null,
+    };
+    if (
+      isBackendReference(value.backend) &&
+      value.backend.backendType === "docker" &&
+      (value.runtime === null || typeof value.runtime === "string")
+    ) {
+      frontendMetadata = {
+        type: "vercel",
+        image: bootSource.image,
+        runtime: value.runtime,
+      };
+    }
+  } else {
+    return null;
+  }
+  const {
+    bootSource: _bootSource,
+    runtime: _runtime,
+    ...common
+  } = value;
+  const migrated = { ...common, bootArtifact, frontendMetadata };
+  return isSandboxRecord(migrated) ? migrated : null;
+}
+
 function isOwner(value: unknown): value is LocalStateOwner {
   return isPlainObject(value) && hasOnlyKeys(value, ["pid", "processStartedAt", "processNonce"]) &&
     Number.isSafeInteger(value.pid) && (value.pid as number) > 0 &&
@@ -248,7 +313,9 @@ function isOwner(value: unknown): value is LocalStateOwner {
 }
 
 function parseState(value: unknown): LocalSandboxStateRecord | null {
-  if (!isPlainObject(value) || value.schemaVersion !== STATE_SCHEMA_VERSION ||
+  if (!isPlainObject(value) ||
+      (value.schemaVersion !== STATE_SCHEMA_VERSION &&
+        value.schemaVersion !== LEGACY_STATE_SCHEMA_VERSION) ||
       (value.kind !== "claim" && value.kind !== "active")) return null;
   const ownershipKeys = [
     "schemaVersion", "kind", "name", "backend", "token", "owner", "claimedAt", "updatedAt",
@@ -259,11 +326,15 @@ function parseState(value: unknown): LocalSandboxStateRecord | null {
       typeof value.token !== "string" || !TOKEN_PATTERN.test(value.token) ||
       !isOwner(value.owner) || !isTimestamp(value.claimedAt) || !isTimestamp(value.updatedAt) ||
       value.updatedAt < value.claimedAt) return null;
-  if (value.kind === "claim") return value as unknown as LocalSandboxClaimRecord;
-  if (!isTimestamp(value.activatedAt) || value.activatedAt < value.claimedAt ||
-      !isSandboxRecord(value.sandbox) || value.sandbox.name !== value.name ||
-      !sameBackend(value.backend, value.sandbox.backend)) return null;
-  return value as unknown as LocalSandboxActiveRecord;
+  const common = { ...value, schemaVersion: STATE_SCHEMA_VERSION };
+  if (value.kind === "claim") return common as unknown as LocalSandboxClaimRecord;
+  if (!isTimestamp(value.activatedAt) || value.activatedAt < value.claimedAt) return null;
+  const sandbox = value.schemaVersion === LEGACY_STATE_SCHEMA_VERSION
+    ? migrateLegacySandboxRecord(value.sandbox)
+    : isSandboxRecord(value.sandbox) ? value.sandbox : null;
+  if (sandbox === null || sandbox.name !== value.name ||
+      !sameBackend(value.backend, sandbox.backend)) return null;
+  return { ...common, sandbox } as unknown as LocalSandboxActiveRecord;
 }
 
 function isMissing(error: unknown): boolean {

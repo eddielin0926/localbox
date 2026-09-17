@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "vitest";
-import { DockerBackend } from "../../src/backends/docker/index.js";
+import { DockerBackend, MANAGED_IMAGES } from "../../src/backends/docker/index.js";
 import { EmbeddedSandboxClient } from "../../src/runtime/embedded.js";
 import type { SandboxSpec } from "../../src/runtime/index.js";
 import {
@@ -42,7 +42,19 @@ const dockerHarness: BackendConformanceHarness = {
   sandboxSpec(name, overrides = {}) {
     const base: SandboxSpec = {
       name,
-      bootSource: { type: "runtime", runtime: "node24" },
+      bootArtifact: {
+        kind: "oci-image",
+        locator: { type: "oci-reference", reference: MANAGED_IMAGES.node24 },
+        digest: null,
+        trust: "trusted",
+        mutability: "mutable",
+        platform: null,
+      },
+      frontendMetadata: {
+        type: "vercel",
+        image: MANAGED_IMAGES.node24,
+        runtime: "node24",
+      },
       source: null,
       persistent: false,
       timeoutMs: 20_000,

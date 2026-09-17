@@ -39,7 +39,13 @@ const processHarness: BackendConformanceHarness = {
   sandboxSpec(name, overrides = {}) {
     const base: SandboxSpec = {
       name,
-      bootSource: { type: "runtime", runtime: "host" },
+      bootArtifact: {
+        kind: "host",
+        locator: { type: "host", selector: "current" },
+        trust: "trusted",
+        mutability: "mutable",
+      },
+      frontendMetadata: null,
       source: null,
       persistent: false,
       timeoutMs: 20_000,

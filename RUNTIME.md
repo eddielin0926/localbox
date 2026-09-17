@@ -1,6 +1,6 @@
 # Runtime client contract
 
-The pending v0.3.0 release candidate adds the public `localbox/runtime` entry point for backend-neutral values exchanged between a compatibility frontend and a Localbox runtime; this entry point is not part of the published v0.2.0 package. It is the shared contract for embedded and future remote clients and does not select a transport.
+The pending runtime releases add the public `localbox/runtime` entry point for backend-neutral values exchanged between a compatibility frontend and a Localbox runtime; this entry point is not part of the published v0.2.0 package. The v0.4 development contract extends the v0.3 boundary with explicit boot artifacts and backend availability probes. It is the shared contract for embedded and future remote clients and does not select a transport.
 
 ## Boundary invariants
 
@@ -37,9 +37,33 @@ Create requirements are a discriminated union. Every requirement names its domai
 
 `EmbeddedSandboxClient.createSandbox` performs backend-reference matching and the complete negotiation before registering the idempotency mutation, claiming the sandbox name, or invoking `backend.createSandbox`. A failed preflight therefore starts no state mutation, backend create, raw command, filesystem transfer, or other allocation. Valid retries retain the existing in-process idempotency behavior; rejected retries are recomputed from immutable input and produce the same ordered issues with the current request ID.
 
+## Boot artifacts
+
+`SandboxSpec.bootArtifact` and `SandboxRecord.bootArtifact` contain exactly one validated, discriminated `BootArtifact`. Provider selectors never cross this boundary. The Vercel frontend resolves its `runtime` and `image` options to a concrete OCI artifact before calling `SandboxClient`; invalid or unsupported provider selectors produce an explicit conversion failure and never select another backend.
+
+| Kind | Locator and identity | Additional fields | Current execution support |
+| --- | --- | --- | --- |
+| `host` | `{ type: "host", selector: "current" }` | `trust: "trusted"`, `mutability: "mutable"` | Process only |
+| `directory` | `{ type: "absolute-path", path }` | explicit trust and mutable/read-only declaration | Modeled; unsupported |
+| `oci-image` | `{ type: "oci-reference", reference }` | nullable sha256/sha512 digest, explicit trust and mutability, nullable Linux/Windows amd64/arm64 platform hint | Docker only |
+| `disk-image` | `{ type: "absolute-path", path }` | nullable digest, raw/qcow2 format, nullable architecture, explicit trust and mutable/read-only declaration | Modeled; unsupported |
+| `snapshot` | `{ type: "snapshot-id", snapshotId, scope, backend }` | backend-scoped locators require backend identity; portable locators prohibit one; nullable digest and explicit trust/mutability | Modeled; unsupported |
+
+Validation rejects relative paths, empty or NUL-bearing identities, whitespace-bearing OCI references, malformed or uppercase digests, unknown fields or kinds, and immutable OCI/snapshot claims without a digest. These declarations prevent callers and backends from inferring portability, integrity, or immutability from a path, tag, or snapshot ID. They are metadata, not an isolation upgrade: Localbox does not verify an arbitrary caller's trust declaration, a mutable tag can change, and a digest states expected content identity rather than proving registry or publisher trust.
+
+`EmbeddedSandboxClient` validates the artifact and derives a mandatory artifact requirement before name claims or backend calls. If the caller omitted that requirement, the client adds it; if the caller supplied one, it must include the actual kind and cannot be weakened by a duplicate. Docker accepts OCI artifacts, including arbitrary explicit image references, under its documented trusted/single-tenant container boundary. Process accepts only the exact current-host artifact. Directory, disk-image, and snapshot inputs remain representation-only until a future backend advertises and implements them.
+
+`frontendMetadata` is a narrow provider-owned display record. The current Vercel variant retains the resolved `image` and original nullable `runtime` so the released synchronous getters survive without reintroducing provider selectors as execution input. Backends execute only `bootArtifact`.
+
+## Backend availability
+
+`SandboxClient.probeAvailability` is a read-only, deadline-aware operation. A successful probe returns schema version `1`, the exact backend identity, `available` or `unavailable`, a millisecond timestamp, and an ordered non-empty diagnostic list. Every diagnostic has a stable code, `info`/`warning`/`error` severity, safe message, actionable remediation, and one typed details object. The embedded client rejects wrong identities, unknown codes, malformed/non-JSON values, inconsistent status/severity, thrown provider values, and late responses; failures use the normal stable envelope. Probe diagnostics deliberately omit environment values, registry credentials, Docker endpoint values, and provider causes.
+
+Probing never creates a sandbox, directory, container, image pull, or prerequisite installation. Docker calls only the daemon version API and distinguishes a missing endpoint, endpoint permission denial, and an otherwise unreachable daemon with context/socket remediation. Process checks POSIX support, the configured absolute non-symlink root or nearest existing parent, read/write/execute access, the current Node executable, and the bundled supervisor program. It does not create the configured root during the probe.
+
 ## Current operation surface
 
-The asynchronous `SandboxClient` covers the behavior required by the current Vercel frontend: create/get/list/stop/delete and deadline extension; command start/wait/bounded output, long-poll following, and portable signal delivery; bounded file read/write, recursive directory creation, and the provider-neutral semantic filesystem operation union; and resolution of a declared port to its loopback HTTP endpoint. Observed sandbox records carry the concrete resolved image, the optional provider-neutral runtime selector that produced it, and the currently resolved endpoint snapshots. This lets compatibility frontends preserve synchronous metadata access without receiving backend handles. The Vercel adapter remains responsible for provider conveniences such as generated names, callbacks, `Date`, `Buffer`, `Stats`, `Dirent`, stream conversion, and `AbortSignal` adaptation.
+The asynchronous `SandboxClient` covers availability plus the behavior required by the current Vercel frontend: create/get/list/stop/delete and deadline extension; command start/wait/bounded output, long-poll following, and portable signal delivery; bounded file read/write, recursive directory creation, the provider-neutral semantic filesystem operation union; and resolution of a declared port to its loopback HTTP endpoint. Observed sandbox records carry the concrete boot artifact, narrow frontend-owned display metadata, and currently resolved endpoint snapshots. Compatibility frontends therefore preserve synchronous metadata access without receiving backend handles or provider selectors as execution input.
 
 ## Embedded construction
 
@@ -49,7 +73,7 @@ The asynchronous `SandboxClient` covers the behavior required by the current Ver
 
 `resolveLocalStateRoot` uses `$XDG_STATE_HOME/localbox` only when `XDG_STATE_HOME` is an absolute path, as required by the XDG Base Directory specification. An unset, empty, or relative value is ignored and falls back to `<homedir>/.local/state/localbox`. An explicit constructor override must also be absolute. This injection point isolates tests and permits multiple runtime instances to share or intentionally separate ownership domains.
 
-The schema-v1 layout is:
+The schema-v2 layout is:
 
 ```text
 <state-root>/                         0700
@@ -65,7 +89,7 @@ The digest is the complete lowercase SHA-256 value, so arbitrary sandbox names n
 
 Name ownership is global within one state root and independent of backend object or process. Acquisition uses an atomic directory creation; there is no check-then-write path. Capability/backend preflight runs first, then creation acquires the claim before backend allocation. Backend success commits the observed record. Backend failure releases only the caller's token; an already-existing backend resource is first observed and recorded for pre-v0.4 Docker compatibility. Get, list, stop, resume, and deadline extension refresh the active record. Successful deletion verifies the token and releases ownership. Every commit, update, and release re-reads and compares the token while holding the entry's filesystem operation lock, so a delayed operation cannot remove or overwrite a successor claim.
 
-Canonical writes use a unique same-directory temporary file, a complete write, file `fsync`, close, atomic rename, and parent-directory `fsync` where the host supports directory synchronization. Temporary files are ignored during reads and removed under the operation lock. Readers accept only bounded regular files containing schema-v1 JSON with the complete expected shape; malformed, partial, version-mismatched, name/digest-mismatched, or non-JSON data is never coerced into metadata. Directory `fsync` is best-effort on hosts that reject it, so the strongest crash guarantee depends on filesystem and operating-system rename/flush semantics.
+Canonical writes use a unique same-directory temporary file, a complete write, file `fsync`, close, atomic rename, and parent-directory `fsync` where the host supports directory synchronization. Temporary files are ignored during reads and removed under the operation lock. Readers accept only bounded regular files containing complete expected JSON; malformed, partial, version/name/digest mismatched, or non-JSON data is never coerced. Schema-v1 claims are upgraded in memory. A schema-v1 active record converts only the exact legacy current-host selector or a concrete image string; all other runtime selectors fail closed rather than being guessed. Converted image provenance is `untrusted`, and state is written as schema v2 on the next commit/update. Directory `fsync` is best-effort on hosts that reject it, so the strongest crash guarantee depends on filesystem and operating-system rename/flush semantics.
 
 Conflict and cleanup reconciliation is conservative:
 
@@ -103,11 +127,11 @@ Host-style backends may implement the internal `filesystemWorkspace(sandboxId)` 
 
 ## Docker backend ownership and security boundary
 
-`DockerBackend` is the only Docker boundary. It owns Dockerode construction and values, managed-image resolution, labels, container creation and inspection, persistence and resource settings, network and published-port inspection, watchdog deadlines, source materialization, raw exec creation, bounded stdin attachment, stream demultiplexing, exit inspection, raw signal delivery, cleanup, and Docker failure translation. It does not contain filesystem operation scripts or semantic filesystem APIs. Docker exec IDs, streams, containers, and inspect values remain private. The backend does not allocate neutral process IDs or retain replay output, cursors, followers, waiters, or frontend callbacks.
+`DockerBackend` is the only Docker execution boundary. It owns Dockerode construction and values, validated OCI artifacts and labels, container creation and inspection, persistence and resource settings, network and published-port inspection, watchdog deadlines, source materialization, raw exec creation, bounded stdin attachment, stream demultiplexing, exit inspection, raw signal delivery, cleanup, availability probing, and Docker failure translation. Vercel runtime/image alias conversion belongs to the frontend. Docker does not contain filesystem operation scripts or semantic filesystem APIs. Docker exec IDs, streams, containers, and inspect values remain private. The backend does not allocate neutral process IDs or retain replay output, cursors, followers, waiters, or frontend callbacks.
 
-Docker is a shared-kernel container backend for trusted or single-tenant local development, not a hostile multi-tenant security boundary. Its isolation is `partial` at `shared-kernel-container`; commands are native while detached lifecycle and filesystem semantics are emulated by the embedded runtime; managed ownership is partial and restricted to Localbox images. Runtime aliases, OCI images, Git, and tarball artifacts are accepted, but directory, disk-image, and snapshot artifacts are not. Persistent containers survive stop/resume and Localbox process restart while Docker data remains; sandbox records can be rediscovered, but processes, buffered output, waiters, and idempotency state cannot.
+Docker is a shared-kernel container backend for trusted or single-tenant local development, not a hostile multi-tenant security boundary. Its isolation is `partial` at `shared-kernel-container`; commands are native while detached lifecycle and filesystem semantics are emulated by the embedded runtime; managed ownership is partial and restricted to Localbox images. Docker accepts only OCI boot artifacts. Arbitrary explicit OCI references remain runnable for compatibility, but an artifact `trust` value is provenance metadata and never strengthens Docker isolation or authorizes managed-root behavior. Git and tarball remain post-boot workspace sources, not boot-artifact kinds. Host, directory, disk-image, and snapshot artifacts are rejected before Docker allocation.
 
-Networking is partial: bridge `allow-all` and network-none `deny-all` are available, published HTTP ports are loopback-only, and custom policies are unsupported. A deny-all sandbox with a Git or tarball source has network access during source materialization and is disconnected afterward. Resources are partial: Docker hard-enforces integer NanoCPU quotas and memory at exactly 2 GiB per vCPU, with no independent memory setting or host-capacity guarantee. Interactive PTYs and snapshot operations are explicitly unsupported. These classifications do not claim the future boot-artifact model.
+Networking is partial: bridge `allow-all` and network-none `deny-all` are available, published HTTP ports are loopback-only, and custom policies are unsupported. A deny-all sandbox with a Git or tarball source has network access during source materialization and is disconnected afterward. Resources are partial: Docker hard-enforces integer NanoCPU quotas and memory at exactly 2 GiB per vCPU, with no independent memory setting or host-capacity guarantee. Interactive PTYs and snapshot operations are explicitly unsupported. Docker does not provide path containment for host directories, VM isolation, portable snapshot guarantees, remote upload/storage, or registry provenance verification.
 
 The default Docker composition lives in `src/default-client.ts` and accepts an explicit absolute state-root override while otherwise following XDG resolution. The Vercel compatibility frontend receives a generic `SandboxClient` factory and retains only the client plus neutral records and IDs. Its create requests require the operational command/filesystem surface, selected source and endpoint operations, accepted artifact kinds, requested persistence, selected network policy, and requested resource values. It accepts native, emulated, or partial implementations because those classifications preserve the released local v0.3 behavior; unsupported snapshot, mount, retention, and custom cloud/network options continue to fail before client allocation.
 
@@ -129,7 +153,7 @@ const client = new EmbeddedSandboxClient(backend, {
 
 The caller injects both roots explicitly; applications that follow XDG should resolve them before construction. The normalized backend root and instance ID are hashed into both a stable backend reference and a digest-only instance directory, so independent identities can share one parent without mutable registries or path injection. `createDefaultSandboxClient()` and the Vercel interception composition remain Docker-backed; there is no environment switch or global process-backend selection.
 
-The process backend accepts only `{ type: "runtime", runtime: "host" }` with no source, no ports, `allow-all` networking, no resource request, and no region. It never treats an OCI image name as permission to execute its contents on the host. Complete capability negotiation runs before a sandbox workspace is created.
+The process backend accepts only `{ kind: "host", locator: { type: "host", selector: "current" }, trust: "trusted", mutability: "mutable" }` with no source, no ports, `allow-all` networking, no resource request, and no region. It never treats an OCI image, directory, disk image, or snapshot locator as permission to execute its contents on the host. Complete artifact and capability preflight runs before a sandbox workspace is created.
 
 | Capability | Classification | Process behavior |
 | --- | --- | --- |
@@ -138,7 +162,7 @@ The process backend accepts only `{ type: "runtime", runtime: "host" }` with no 
 | Filesystem mkdir/read/write | `emulated` | Neutral bridge mapped into the private workspace with traversal and symlink escape checks |
 | Raw stdin | `native` | One binary-safe payload bounded to 1 MiB |
 | Isolation | `partial`, level `process`, tenancy `trusted` | Private directory and process bookkeeping only; **no security isolation boundary** |
-| Artifacts | `partial` | The `host` runtime selector only; Git, tarball, OCI image, directory, disk image, and snapshot inputs are rejected |
+| Artifacts | `partial` | The exact current-host artifact only; Git, tarball, OCI image, directory, disk image, and snapshot inputs are rejected |
 | Persistence | `native` | Workspace and lifecycle descriptor survive stop/resume and backend reconstruction |
 | Recovery | `partial`, scope `sandbox` | Metadata/workspace only; commands, output, waiters, and idempotency state are not recovered |
 | Networking | `partial`, mode `allow-all` | The host network stack is shared directly; no namespace, deny policy, custom policy, endpoint record, or port remapping |
@@ -148,7 +172,7 @@ Each instance stores schema-v1 descriptors below `<root>/instances/<identity-dig
 
 Every command is launched through a small Node supervisor using direct argv and `shell: false`. On POSIX the target becomes a distinct process-group leader. Signals address that group; stop, delete, deadline expiry, filesystem abort, and raw-command disposal send `TERM`, wait a bounded interval, then send `KILL`. Completion is emitted once after UTF-8 stream decoding and descendant cleanup. The supervisor records the Localbox parent PID and polls both parent identity and liveness, so abrupt parent exit triggers the same group cleanup before the supervisor exits. Process IDs and supervisor handles never enter descriptors or public records.
 
-The backend currently requires POSIX process-group semantics and rejects construction on Windows. Linux is the CI-covered platform; macOS uses the same Node/POSIX primitives but remains a platform caveat until covered by CI. Host commands can read host files, use host credentials, inspect or signal other same-user processes, bind arbitrary ports, and consume unbounded resources. Therefore `ProcessBackend` **must not** run hostile code, untrusted dependencies, or multi-tenant workloads; use a container, namespace sandbox, or VM backend for those cases.
+The backend requires POSIX process-group semantics. Its constructor retains configuration so `probeAvailability` can report unsupported platforms or invalid roots without mutation; lifecycle operations still fail closed when those prerequisites are absent. Linux is the CI-covered platform; macOS uses the same Node/POSIX primitives but remains a platform caveat until covered by CI. Host commands can read host files, use host credentials, inspect or signal other same-user processes, bind arbitrary ports, and consume unbounded resources. Therefore `ProcessBackend` **must not** run hostile code, untrusted dependencies, or multi-tenant workloads; a caller's artifact trust declaration is not sandboxing. Use a container, namespace sandbox, or VM backend for those cases.
 
 ## Backend conformance profiles
 
@@ -164,4 +188,4 @@ Valid contract failures returned by a backend retain their category, code, messa
 
 ## Intentional non-goals
 
-This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, or additional provider APIs. Bubblewrap, Podman, the general boot-artifact/availability model, and a remote service or control plane remain deferred to later milestones. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
+This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote artifact upload/storage, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, automatic prerequisite installation, or additional provider APIs. Directory/disk/snapshot execution, Bubblewrap, Podman, and a remote service or control plane remain deferred. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).

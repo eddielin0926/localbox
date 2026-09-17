@@ -34,7 +34,13 @@ try {
     ],
     spec: {
       name: sandboxId,
-      bootSource: { type: "runtime", runtime: "host" },
+      bootArtifact: {
+        kind: "host",
+        locator: { type: "host", selector: "current" },
+        trust: "trusted",
+        mutability: "mutable",
+      },
+      frontendMetadata: null,
       source: null,
       persistent: true,
       timeoutMs: 20_000,

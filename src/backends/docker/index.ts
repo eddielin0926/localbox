@@ -14,32 +14,36 @@ import {
   UnsupportedImageError,
   UnsupportedSandboxCapabilityError,
 } from "./errors.js";
-import type {
-  BackendReference,
-  ClientFailure,
-  ClientResult,
-  CreateSandboxRequest,
-  CreateSandboxResult,
-  DeleteSandboxRequest,
-  DeleteSandboxResult,
-  ExtendSandboxDeadlineRequest,
-  ExtendSandboxDeadlineResult,
-  GetEndpointRequest,
-  EndpointRecord,
-  GetEndpointResult,
-  GetSandboxRequest,
-  GetSandboxResult,
-  JsonObject,
-  ListSandboxesRequest,
-  ListSandboxesResult,
-  RequestMetadata,
-  SandboxBackend,
-  SandboxCapabilities,
-  SandboxRecord,
-  StartRawCommandRequest,
-  StartRawCommandResult,
-  StopSandboxRequest,
-  StopSandboxResult,
+import {
+  validateBootArtifact,
+  type AvailabilityDiagnostic,
+  type BackendReference,
+  type ClientFailure,
+  type ClientResult,
+  type CreateSandboxRequest,
+  type CreateSandboxResult,
+  type DeleteSandboxRequest,
+  type DeleteSandboxResult,
+  type ExtendSandboxDeadlineRequest,
+  type ExtendSandboxDeadlineResult,
+  type GetEndpointRequest,
+  type EndpointRecord,
+  type GetEndpointResult,
+  type GetSandboxRequest,
+  type GetSandboxResult,
+  type JsonObject,
+  type ListSandboxesRequest,
+  type ListSandboxesResult,
+  type ProbeAvailabilityRequest,
+  type ProbeAvailabilityResult,
+  type RequestMetadata,
+  type SandboxBackend,
+  type SandboxCapabilities,
+  type SandboxRecord,
+  type StartRawCommandRequest,
+  type StartRawCommandResult,
+  type StopSandboxRequest,
+  type StopSandboxResult,
 } from "../../runtime/index.js";
 import { Sandbox as DockerSandbox } from "./sandbox.js";
 import type {
@@ -117,8 +121,8 @@ const CAPABILITIES = Object.freeze({
   },
   artifacts: {
     support: "partial",
-    constraints: { kinds: ["runtime", "oci-image", "git", "tarball"] },
-    diagnostic: "Docker accepts managed runtime aliases, OCI images, Git sources, and tarballs; directory, disk-image, and snapshot artifacts are not accepted.",
+    constraints: { kinds: ["oci-image"] },
+    diagnostic: "Docker accepts validated OCI image artifacts under its trusted or single-tenant workload boundary; artifact trust metadata describes provenance and does not strengthen container isolation.",
   },
   persistence: {
     support: "native",
@@ -374,12 +378,22 @@ function sourceOptions(source: CreateSandboxRequest["spec"]["source"]): SandboxS
 
 function createOptions(request: CreateSandboxRequest, signal: AbortSignal | undefined): SandboxCreateOptions {
   const spec = request.spec;
+  const validation = validateBootArtifact(spec.bootArtifact);
+  if (!validation.ok) {
+    throw new InvalidSandboxOptionsError(`${validation.field}: ${validation.reason}`);
+  }
+  if (validation.artifact.kind !== "oci-image") {
+    throw new UnsupportedSandboxCapabilityError(
+      `boot artifact kind ${validation.artifact.kind}`,
+    );
+  }
   const source = sourceOptions(spec.source);
   return {
     name: spec.name,
-    ...(spec.bootSource.type === "runtime"
-      ? { runtime: spec.bootSource.runtime }
-      : { image: spec.bootSource.image }),
+    bootArtifact: validation.artifact,
+    ...(spec.frontendMetadata?.runtime === null || spec.frontendMetadata === null
+      ? {}
+      : { runtime: spec.frontendMetadata.runtime }),
     ...(source === undefined ? {} : { source }),
     persistent: spec.persistent,
     timeout: spec.timeoutMs,
@@ -420,8 +434,12 @@ function sandboxRecord(sandbox: DockerSandbox, now = Date.now()): SandboxRecord 
     name: sandbox.name,
     status: sandbox.status,
     persistent: sandbox.persistent,
-    bootSource: { type: "image", image: sandbox.image },
-    runtime: sandbox.runtime ?? null,
+    bootArtifact: sandbox.bootArtifact,
+    frontendMetadata: {
+      type: "vercel",
+      image: sandbox.image,
+      runtime: sandbox.runtime ?? null,
+    },
     backend: REFERENCE,
     createdAt: sandbox.createdAt.getTime(),
     updatedAt: now,
@@ -446,8 +464,12 @@ function listRecord(item: SandboxListItem): SandboxRecord {
     name: item.name,
     status: item.status,
     persistent: item.persistent,
-    bootSource: { type: "image", image: item.image },
-    runtime: item.runtime ?? null,
+    bootArtifact: item.bootArtifact,
+    frontendMetadata: {
+      type: "vercel",
+      image: item.image,
+      runtime: item.runtime ?? null,
+    },
     backend: REFERENCE,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
@@ -482,6 +504,111 @@ export class DockerBackend implements SandboxBackend {
 
   constructor() {
     this.#docker = new Dockerode();
+  }
+
+  async probeAvailability(
+    request: ProbeAvailabilityRequest,
+  ): Promise<ClientResult<ProbeAvailabilityResult>> {
+    const remaining = request.deadline === null
+      ? null
+      : request.deadline.expiresAt - Date.now();
+    if (remaining !== null && remaining <= 0) {
+      return translatedFailure(
+        request.requestId,
+        "probeAvailability",
+        new DOMException("The operation timed out", "AbortError"),
+        true,
+      );
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const versionRequest = this.#docker.version();
+      const timeout = Promise.withResolvers<never>();
+      if (remaining !== null) {
+        timer = setTimeout(() => {
+          timeout.reject(new DOMException("The operation timed out", "AbortError"));
+        }, remaining);
+        timer.unref();
+      }
+      const version = remaining === null
+        ? await versionRequest
+        : await Promise.race([versionRequest, timeout.promise]);
+      const diagnostic: AvailabilityDiagnostic = {
+        code: "DOCKER_DAEMON_AVAILABLE",
+        severity: "info",
+        message: "The Docker daemon answered the version API.",
+        action: "No action is required.",
+        details: {
+          type: "docker-daemon",
+          reason: "available",
+          apiVersion: typeof version.ApiVersion === "string" ? version.ApiVersion : null,
+        },
+      };
+      return success({
+        availability: {
+          schemaVersion: 1,
+          backend: REFERENCE,
+          status: "available",
+          checkedAt: Date.now(),
+          diagnostics: [diagnostic],
+        },
+      });
+    } catch (error) {
+      if (
+        request.deadline !== null &&
+        request.deadline.expiresAt <= Date.now()
+      ) {
+        return translatedFailure(request.requestId, "probeAvailability", error, true);
+      }
+      const code = (error as NodeJS.ErrnoException).code;
+      const diagnostic: AvailabilityDiagnostic = code === "ENOENT"
+        ? {
+          code: "DOCKER_SOCKET_NOT_FOUND",
+          severity: "error",
+          message: "The configured Docker endpoint does not exist.",
+          action: "Start Docker Desktop or the Docker service, then verify the selected Docker context and socket.",
+          details: {
+            type: "docker-daemon",
+            reason: "not-found",
+            apiVersion: null,
+          },
+        }
+        : code === "EACCES" || code === "EPERM"
+        ? {
+          code: "DOCKER_SOCKET_PERMISSION_DENIED",
+          severity: "error",
+          message: "The Docker endpoint is present but the current user cannot access it.",
+          action: "Grant the current user access to the Docker socket or select a Docker context it can use.",
+          details: {
+            type: "docker-daemon",
+            reason: "permission-denied",
+            apiVersion: null,
+          },
+        }
+        : {
+          code: "DOCKER_DAEMON_UNREACHABLE",
+          severity: "error",
+          message: "The Docker daemon did not answer the version API.",
+          action: "Start the Docker daemon and verify the active Docker context and endpoint configuration.",
+          details: {
+            type: "docker-daemon",
+            reason: "unreachable",
+            apiVersion: null,
+          },
+        };
+      return success({
+        availability: {
+          schemaVersion: 1,
+          backend: REFERENCE,
+          status: "unavailable",
+          checkedAt: Date.now(),
+          diagnostics: [diagnostic],
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async #run<T extends JsonObject>(

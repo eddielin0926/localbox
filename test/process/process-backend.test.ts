@@ -40,7 +40,13 @@ function metadata(label: string) {
 function spec(name: string, overrides: Partial<SandboxSpec> = {}): SandboxSpec {
   const base: SandboxSpec = {
     name,
-    bootSource: { type: "runtime", runtime: "host" },
+    bootArtifact: {
+      kind: "host",
+      locator: { type: "host", selector: "current" },
+      trust: "trusted",
+      mutability: "mutable",
+    },
+    frontendMetadata: null,
     source: null,
     persistent: true,
     timeoutMs: 20_000,
@@ -138,7 +144,16 @@ describe("ProcessBackend", () => {
       const client = new EmbeddedSandboxClient(backend, { stateRoot: join(root, "state") });
       const name = `rejected-${randomUUID()}`;
       const result = await client.createSandbox({
-        ...createRequest(name, { bootSource: { type: "image", image: "node:24" } }),
+        ...createRequest(name, {
+          bootArtifact: {
+            kind: "oci-image",
+            locator: { type: "oci-reference", reference: "node:24" },
+            digest: null,
+            trust: "untrusted",
+            mutability: "mutable",
+            platform: null,
+          },
+        }),
         requirements: [{
           type: "isolation",
           minimumLevel: "shared-kernel-container",

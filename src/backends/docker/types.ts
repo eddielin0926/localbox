@@ -1,3 +1,4 @@
+import type { OciImageBootArtifact } from "../../runtime/index.js";
 import type { Sandbox } from "./sandbox.js";
 
 export type SandboxStatus = "pending" | "running" | "stopping" | "stopped" | "failed";
@@ -38,6 +39,7 @@ export type SandboxSource =
     };
 
 export interface SandboxCreateOptions {
+  readonly bootArtifact: OciImageBootArtifact;
   readonly name?: string;
   readonly source?: SandboxSource;
   readonly ports?: readonly number[];
@@ -59,7 +61,6 @@ export interface SandboxCreateOptions {
   };
   readonly onResume?: (sandbox: Sandbox) => Promise<void>;
   readonly runtime?: string;
-  readonly image?: string;
 }
 
 export interface SandboxGetOptions {
@@ -105,6 +106,7 @@ export interface SandboxListItem {
   readonly vcpus?: number;
   readonly memory?: number;
   readonly image: string;
+  readonly bootArtifact: OciImageBootArtifact;
   readonly runtime?: string;
   readonly ports: readonly number[];
   readonly endpoints: readonly { readonly port: number; readonly url: string }[];

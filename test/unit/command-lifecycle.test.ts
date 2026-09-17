@@ -87,6 +87,9 @@ function backend(raw: ControlledRawCommand): SandboxBackend {
   return {
     reference: REFERENCE,
     capabilities: TEST_CAPABILITIES,
+    probeAvailability: (request) => Promise.resolve(
+      unavailable(request.requestId, "probeAvailability"),
+    ),
     createSandbox: (request) => Promise.resolve(unavailable(request.requestId, "createSandbox")),
     getSandbox: (request) => Promise.resolve(unavailable(request.requestId, "getSandbox")),
     listSandboxes: (request) => Promise.resolve(unavailable(request.requestId, "listSandboxes")),

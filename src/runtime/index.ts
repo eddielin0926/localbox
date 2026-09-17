@@ -112,11 +112,9 @@ export type IsolationLevel =
   | "virtual-machine";
 export type IsolationTenancy = "trusted" | "single-tenant" | "multi-tenant";
 export type ArtifactKind =
-  | "runtime"
-  | "oci-image"
-  | "git"
-  | "tarball"
+  | "host"
   | "directory"
+  | "oci-image"
   | "disk-image"
   | "snapshot";
 export type PersistenceScope = "sandbox-lifecycle" | "backend-restart";
@@ -243,17 +241,83 @@ export type SandboxRequirementIssue = JsonObject & {
   readonly backendDiagnostic: string | null;
 };
 
-export type RuntimeBootSource = JsonObject & {
-  readonly type: "runtime";
-  readonly runtime: string;
+export type ArtifactTrust = "trusted" | "untrusted";
+export type ArtifactDigest = JsonObject & {
+  readonly algorithm: "sha256" | "sha512";
+  readonly value: string;
+};
+export type ArtifactPlatform = JsonObject & {
+  readonly os: "linux" | "windows";
+  readonly architecture: "amd64" | "arm64";
+  readonly variant: string | null;
 };
 
-export type ImageBootSource = JsonObject & {
-  readonly type: "image";
+export type HostBootArtifact = JsonObject & {
+  readonly kind: "host";
+  readonly locator: JsonObject & {
+    readonly type: "host";
+    readonly selector: "current";
+  };
+  readonly trust: "trusted";
+  readonly mutability: "mutable";
+};
+export type DirectoryBootArtifact = JsonObject & {
+  readonly kind: "directory";
+  readonly locator: JsonObject & {
+    readonly type: "absolute-path";
+    readonly path: string;
+  };
+  readonly trust: ArtifactTrust;
+  readonly mutability: "mutable" | "read-only";
+};
+export type OciImageBootArtifact = JsonObject & {
+  readonly kind: "oci-image";
+  readonly locator: JsonObject & {
+    readonly type: "oci-reference";
+    readonly reference: string;
+  };
+  readonly digest: ArtifactDigest | null;
+  readonly trust: ArtifactTrust;
+  readonly mutability: "mutable" | "immutable";
+  readonly platform: ArtifactPlatform | null;
+};
+export type DiskImageBootArtifact = JsonObject & {
+  readonly kind: "disk-image";
+  readonly locator: JsonObject & {
+    readonly type: "absolute-path";
+    readonly path: string;
+  };
+  readonly digest: ArtifactDigest | null;
+  readonly trust: ArtifactTrust;
+  readonly mutability: "mutable" | "read-only";
+  readonly format: "raw" | "qcow2";
+  readonly architecture: "amd64" | "arm64" | null;
+};
+export type SnapshotBootArtifact = JsonObject & {
+  readonly kind: "snapshot";
+  readonly locator: JsonObject & {
+    readonly type: "snapshot-id";
+    readonly snapshotId: string;
+    readonly scope: "backend" | "portable";
+    readonly backend: BackendReference | null;
+  };
+  readonly digest: ArtifactDigest | null;
+  readonly trust: ArtifactTrust;
+  readonly mutability: "mutable" | "immutable";
+};
+export type BootArtifact =
+  | HostBootArtifact
+  | DirectoryBootArtifact
+  | OciImageBootArtifact
+  | DiskImageBootArtifact
+  | SnapshotBootArtifact;
+
+/** Provider-owned display metadata; it never selects backend execution. */
+export type SandboxFrontendMetadata = JsonObject & {
+  readonly type: "vercel";
   readonly image: string;
+  readonly runtime: string | null;
 };
-
-export type SandboxBootSource = RuntimeBootSource | ImageBootSource;
 
 export type GitSandboxSource = JsonObject & {
   readonly type: "git";
@@ -282,7 +346,8 @@ export type SandboxResources = JsonObject & {
 /** Complete desired state used to create a sandbox. */
 export type SandboxSpec = JsonObject & {
   readonly name: string;
-  readonly bootSource: SandboxBootSource;
+  readonly bootArtifact: BootArtifact;
+  readonly frontendMetadata: SandboxFrontendMetadata | null;
   readonly source: SandboxSource | null;
   readonly persistent: boolean;
   readonly timeoutMs: number;
@@ -301,9 +366,8 @@ export type SandboxRecord = JsonObject & {
   readonly name: string;
   readonly status: SandboxStatus;
   readonly persistent: boolean;
-  readonly bootSource: SandboxBootSource;
-  /** Provider runtime selector when one was used to resolve the concrete image. */
-  readonly runtime: string | null;
+  readonly bootArtifact: BootArtifact;
+  readonly frontendMetadata: SandboxFrontendMetadata | null;
   readonly backend: BackendReference;
   readonly createdAt: TimestampMilliseconds;
   readonly updatedAt: TimestampMilliseconds;
@@ -595,6 +659,57 @@ export type GetEndpointResult = JsonObject & {
   readonly endpoint: EndpointRecord;
 };
 
+export type AvailabilityStatus = "available" | "unavailable";
+export type AvailabilityDiagnosticSeverity = "info" | "warning" | "error";
+export type AvailabilityDiagnosticCode =
+  | "DOCKER_DAEMON_AVAILABLE"
+  | "DOCKER_SOCKET_NOT_FOUND"
+  | "DOCKER_SOCKET_PERMISSION_DENIED"
+  | "DOCKER_DAEMON_UNREACHABLE"
+  | "PROCESS_PREREQUISITES_AVAILABLE"
+  | "PROCESS_PLATFORM_UNSUPPORTED"
+  | "PROCESS_ROOT_INVALID"
+  | "PROCESS_ROOT_INACCESSIBLE"
+  | "PROCESS_NODE_UNAVAILABLE"
+  | "PROCESS_SUPERVISOR_INVALID";
+export type AvailabilityDiagnosticDetails =
+  | (JsonObject & {
+    readonly type: "docker-daemon";
+    readonly reason: "available" | "not-found" | "permission-denied" | "unreachable";
+    readonly apiVersion: string | null;
+  })
+  | (JsonObject & {
+    readonly type: "process-platform";
+    readonly platform: string;
+  })
+  | (JsonObject & {
+    readonly type: "process-root";
+    readonly prerequisite: "absolute" | "non-symlink" | "directory" | "read-write-execute";
+  })
+  | (JsonObject & {
+    readonly type: "process-runtime";
+    readonly prerequisite: "node-executable" | "supervisor-program";
+  });
+export type AvailabilityDiagnostic = JsonObject & {
+  readonly code: AvailabilityDiagnosticCode;
+  readonly severity: AvailabilityDiagnosticSeverity;
+  readonly message: string;
+  readonly action: string;
+  readonly details: AvailabilityDiagnosticDetails;
+};
+export type BackendAvailability = JsonObject & {
+  readonly schemaVersion: 1;
+  readonly backend: BackendReference;
+  readonly status: AvailabilityStatus;
+  readonly checkedAt: TimestampMilliseconds;
+  /** Diagnostics are ordered from the first prerequisite checked to the last. */
+  readonly diagnostics: readonly AvailabilityDiagnostic[];
+};
+export type ProbeAvailabilityRequest = RequestMetadata;
+export type ProbeAvailabilityResult = JsonObject & {
+  readonly availability: BackendAvailability;
+};
+
 export type ErrorCategory =
   | "invalid-request"
   | "unsupported-requirement"
@@ -685,6 +800,9 @@ export type ClientResult<T extends JsonObject> = ClientSuccess<T> | ClientFailur
  * ClientResult rather than by an Error instance.
  */
 export interface SandboxClient {
+  probeAvailability(
+    request: ProbeAvailabilityRequest,
+  ): Promise<ClientResult<ProbeAvailabilityResult>>;
   createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>>;
   getSandbox(request: GetSandboxRequest): Promise<ClientResult<GetSandboxResult>>;
   listSandboxes(request: ListSandboxesRequest): Promise<ClientResult<ListSandboxesResult>>;
@@ -733,6 +851,7 @@ export type SandboxBackend = Pick<
   | "deleteSandbox"
   | "extendSandboxDeadline"
   | "getEndpoint"
+  | "probeAvailability"
 > & {
   readonly reference: BackendReference;
   readonly capabilities: SandboxCapabilities;
@@ -773,6 +892,8 @@ export {
   negotiateSandboxRequirements,
   SANDBOX_OPERATIONAL_CAPABILITIES,
 } from "./capabilities.js";
+export { validateBootArtifact } from "./artifacts.js";
+export type { BootArtifactValidationResult } from "./artifacts.js";
 export {
   DockerBackend,
   MANAGED_IMAGES,
@@ -781,7 +902,6 @@ export {
 } from "../default-client.js";
 export {
   PROCESS_CAPABILITIES,
-  PROCESS_RUNTIME,
   PROCESS_VIRTUAL_WORKSPACE,
   ProcessBackend,
 } from "../backends/process/index.js";

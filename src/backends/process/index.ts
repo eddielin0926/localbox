@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
+  access,
   chmod,
   mkdir,
   lstat,
@@ -12,40 +13,45 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
+import { constants as fsConstants, type Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
-import { isAbsolute, join, posix, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { setTimeout as delay } from "node:timers/promises";
 import { FILESYSTEM_TRANSFER_CHUNK_BYTES } from "../../runtime/filesystem-bridge.js";
 import { negotiateSandboxRequirements } from "../../runtime/capabilities.js";
-import type {
-  BackendReference,
-  ClientFailure,
-  ClientResult,
-  CreateSandboxRequest,
-  CreateSandboxResult,
-  DeleteSandboxRequest,
-  DeleteSandboxResult,
-  ExtendSandboxDeadlineRequest,
-  ExtendSandboxDeadlineResult,
-  GetEndpointRequest,
-  GetEndpointResult,
-  GetSandboxRequest,
-  GetSandboxResult,
-  JsonObject,
-  ListSandboxesRequest,
-  ListSandboxesResult,
-  ProcessSignal,
-  RawCommand,
-  RawCommandEvent,
-  RequestMetadata,
-  SandboxBackend,
-  SandboxCapabilities,
-  SandboxRecord,
-  StartRawCommandRequest,
-  StartRawCommandResult,
-  StopSandboxRequest,
-  StopSandboxResult,
+import {
+  validateBootArtifact,
+  type AvailabilityDiagnostic,
+  type BackendReference,
+  type ClientFailure,
+  type ClientResult,
+  type CreateSandboxRequest,
+  type CreateSandboxResult,
+  type DeleteSandboxRequest,
+  type DeleteSandboxResult,
+  type ExtendSandboxDeadlineRequest,
+  type ExtendSandboxDeadlineResult,
+  type GetEndpointRequest,
+  type GetEndpointResult,
+  type GetSandboxRequest,
+  type GetSandboxResult,
+  type JsonObject,
+  type ListSandboxesRequest,
+  type ListSandboxesResult,
+  type ProbeAvailabilityRequest,
+  type ProbeAvailabilityResult,
+  type ProcessSignal,
+  type RawCommand,
+  type RawCommandEvent,
+  type RequestMetadata,
+  type SandboxBackend,
+  type SandboxCapabilities,
+  type SandboxRecord,
+  type StartRawCommandRequest,
+  type StartRawCommandResult,
+  type StopSandboxRequest,
+  type StopSandboxResult,
 } from "../../runtime/index.js";
 import { PROCESS_SUPERVISOR_PROGRAM } from "./supervisor.js";
 
@@ -59,7 +65,12 @@ const LOCK_POLL_MS = 20;
 const SUPERVISOR_START_TIMEOUT_MS = 5_000;
 const SUPERVISOR_STOP_TIMEOUT_MS = 2_500;
 const VIRTUAL_WORKSPACE = "/vercel/sandbox";
-const PROCESS_RUNTIME = "host";
+const HOST_ARTIFACT = Object.freeze({
+  kind: "host",
+  locator: { type: "host", selector: "current" },
+  trust: "trusted",
+  mutability: "mutable",
+} as const);
 
 const PROCESS_CAPABILITIES = Object.freeze({
   schemaVersion: 1,
@@ -122,8 +133,8 @@ const PROCESS_CAPABILITIES = Object.freeze({
   },
   artifacts: {
     support: "partial",
-    constraints: { kinds: ["runtime"] },
-    diagnostic: "Only the runtime selector 'host' is accepted; OCI images and source, directory, disk-image, and snapshot artifacts are rejected.",
+    constraints: { kinds: ["host"] },
+    diagnostic: "Only the validated current-host artifact is accepted; OCI image, directory, disk-image, and snapshot artifacts are rejected.",
   },
   persistence: {
     support: "native",
@@ -490,8 +501,8 @@ function descriptorRecord(descriptor: ProcessDescriptor, backend: BackendReferen
     name: descriptor.name,
     status: descriptor.status,
     persistent: descriptor.persistent,
-    bootSource: { type: "runtime", runtime: PROCESS_RUNTIME },
-    runtime: PROCESS_RUNTIME,
+    bootArtifact: HOST_ARTIFACT,
+    frontendMetadata: null,
     backend,
     createdAt: descriptor.createdAt,
     updatedAt: descriptor.updatedAt,
@@ -524,20 +535,151 @@ export class ProcessBackend implements SandboxBackend {
   readonly #deadlineTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(options: ProcessBackendOptions) {
-    if (process.platform === "win32") {
-      throw new TypeError("ProcessBackend requires POSIX process-group semantics and is not supported on Windows.");
-    }
-    if (!isAbsolute(options.root)) throw new TypeError("The process backend root must be an absolute path.");
     const instanceId = options.instanceId;
     if (instanceId.length === 0 || instanceId.includes("\0")) {
       throw new TypeError("The process backend instance ID must be a non-empty string without NUL bytes.");
     }
-    this.root = resolve(options.root);
+    this.root = isAbsolute(options.root) ? resolve(options.root) : options.root;
     this.instanceId = instanceId;
     const identity = hash(`${this.root}\0${instanceId}`);
     this.reference = Object.freeze({ backendId: `local-process-${identity}`, backendType: "process" });
     this.#instanceRoot = join(this.root, "instances", identity);
     this.#sandboxesRoot = join(this.#instanceRoot, "sandboxes");
+  }
+
+  probeAvailability(
+    request: ProbeAvailabilityRequest,
+  ): Promise<ClientResult<ProbeAvailabilityResult>> {
+    return this.#run(request, "probeAvailability", async () => {
+      const diagnostics: AvailabilityDiagnostic[] = [];
+      if (process.platform === "win32") {
+        diagnostics.push({
+          code: "PROCESS_PLATFORM_UNSUPPORTED",
+          severity: "error",
+          message: "The process backend requires POSIX process-group semantics.",
+          action: "Use the process backend on Linux or macOS, or select an isolated backend supported by this host.",
+          details: { type: "process-platform", platform: process.platform },
+        });
+      }
+
+      if (!isAbsolute(this.root)) {
+        diagnostics.push({
+          code: "PROCESS_ROOT_INVALID",
+          severity: "error",
+          message: "The configured process backend root is not absolute.",
+          action: "Configure an absolute private state root owned by the Localbox user.",
+          details: { type: "process-root", prerequisite: "absolute" },
+        });
+      } else {
+        let nearest = this.root;
+        let metadata: Stats | undefined;
+        for (;;) {
+          try {
+            metadata = await lstat(nearest);
+            break;
+          } catch (error) {
+            if (!isErrno(error, "ENOENT")) {
+              diagnostics.push({
+                code: "PROCESS_ROOT_INACCESSIBLE",
+                severity: "error",
+                message: "The configured process backend root cannot be inspected.",
+                action: "Grant the Localbox user read, write, and execute access to the configured root or its nearest existing parent.",
+                details: { type: "process-root", prerequisite: "read-write-execute" },
+              });
+              break;
+            }
+            const parent = dirname(nearest);
+            if (parent === nearest) break;
+            nearest = parent;
+          }
+        }
+        if (metadata !== undefined) {
+          if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+            diagnostics.push({
+              code: "PROCESS_ROOT_INVALID",
+              severity: "error",
+              message: "The configured process backend root or its nearest existing parent is not a real directory.",
+              action: "Configure a path whose existing components are non-symlink directories.",
+              details: {
+                type: "process-root",
+                prerequisite: metadata.isSymbolicLink() ? "non-symlink" : "directory",
+              },
+            });
+          } else {
+            try {
+              if (await realpath(nearest) !== nearest) {
+                diagnostics.push({
+                  code: "PROCESS_ROOT_INVALID",
+                  severity: "error",
+                  message: "The configured process backend root traverses a symbolic link.",
+                  action: "Configure a canonical absolute path containing only real directories.",
+                  details: { type: "process-root", prerequisite: "non-symlink" },
+                });
+              } else {
+                await access(
+                  nearest,
+                  fsConstants.R_OK | fsConstants.W_OK | fsConstants.X_OK,
+                );
+              }
+            } catch {
+              if (!diagnostics.some(({ code }) => code === "PROCESS_ROOT_INVALID")) {
+                diagnostics.push({
+                  code: "PROCESS_ROOT_INACCESSIBLE",
+                  severity: "error",
+                  message: "The Localbox user cannot create or access process backend state.",
+                  action: "Grant read, write, and execute access to the configured root or its nearest existing parent.",
+                  details: { type: "process-root", prerequisite: "read-write-execute" },
+                });
+              }
+            }
+          }
+        }
+      }
+
+      try {
+        const node = await stat(process.execPath);
+        if (!node.isFile()) throw new Error("Node executable is not a regular file.");
+        await access(process.execPath, fsConstants.X_OK);
+      } catch {
+        diagnostics.push({
+          code: "PROCESS_NODE_UNAVAILABLE",
+          severity: "error",
+          message: "The current Node executable is not an accessible executable file.",
+          action: "Run Localbox with a working Node.js executable available to the current user.",
+          details: { type: "process-runtime", prerequisite: "node-executable" },
+        });
+      }
+      if (PROCESS_SUPERVISOR_PROGRAM.trim().length === 0) {
+        diagnostics.push({
+          code: "PROCESS_SUPERVISOR_INVALID",
+          severity: "error",
+          message: "The bundled process supervisor program is unavailable.",
+          action: "Reinstall the Localbox package from a complete trusted distribution.",
+          details: { type: "process-runtime", prerequisite: "supervisor-program" },
+        });
+      }
+      this.#assertRequestDeadline(request, "probeAvailability");
+      if (diagnostics.length === 0) {
+        diagnostics.push({
+          code: "PROCESS_PREREQUISITES_AVAILABLE",
+          severity: "info",
+          message: "The host platform, private state root, Node executable, and process supervisor prerequisites are available.",
+          action: "No action is required.",
+          details: { type: "process-runtime", prerequisite: "node-executable" },
+        });
+      }
+      return {
+        availability: {
+          schemaVersion: 1,
+          backend: this.reference,
+          status: diagnostics.some(({ severity }) => severity === "error")
+            ? "unavailable"
+            : "available",
+          checkedAt: Date.now(),
+          diagnostics,
+        },
+      };
+    });
   }
 
   createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
@@ -785,6 +927,12 @@ export class ProcessBackend implements SandboxBackend {
   }
 
   async #initialize(): Promise<void> {
+    if (process.platform === "win32") {
+      throw new TypeError("ProcessBackend requires POSIX process-group semantics and is not supported on Windows.");
+    }
+    if (!isAbsolute(this.root)) {
+      throw new TypeError("The process backend root must be an absolute path.");
+    }
     await ensureDirectoryPath(this.#sandboxesRoot);
     if (await realpath(this.root) !== this.root) {
       throw new TypeError("The process backend root must not traverse symbolic links.");
@@ -819,8 +967,15 @@ export class ProcessBackend implements SandboxBackend {
     if (request.backend !== null && (request.backend.backendId !== this.reference.backendId || request.backend.backendType !== this.reference.backendType)) {
       throw this.#invalid("backend", "The requested backend reference does not match this process backend instance.");
     }
-    if (request.spec.bootSource.type !== "runtime" || request.spec.bootSource.runtime !== PROCESS_RUNTIME) {
-      throw this.#invalid("spec.bootSource", "ProcessBackend accepts only { type: 'runtime', runtime: 'host' }.");
+    const validation = validateBootArtifact(request.spec.bootArtifact);
+    if (!validation.ok || validation.artifact.kind !== "host") {
+      throw this.#invalid("spec.bootArtifact", "ProcessBackend accepts only the validated current-host artifact.");
+    }
+    if (
+      validation.artifact.locator.type !== "host" ||
+      validation.artifact.locator.selector !== "current"
+    ) {
+      throw this.#invalid("spec.bootArtifact.locator", "ProcessBackend accepts only the current host selector.");
     }
     if (request.spec.source !== null) throw this.#invalid("spec.source", "ProcessBackend does not materialize Git or tarball sources.");
     if (request.spec.networkPolicy !== "allow-all") throw this.#invalid("spec.networkPolicy", "ProcessBackend supports only allow-all host networking.");
@@ -1129,4 +1284,4 @@ async function syncDirectory(path: string): Promise<void> {
 }
 
 export type { ProcessBackendOptions };
-export { PROCESS_CAPABILITIES, PROCESS_RUNTIME, VIRTUAL_WORKSPACE as PROCESS_VIRTUAL_WORKSPACE };
+export { PROCESS_CAPABILITIES, VIRTUAL_WORKSPACE as PROCESS_VIRTUAL_WORKSPACE };
