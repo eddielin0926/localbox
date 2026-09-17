@@ -103,7 +103,7 @@ jobs:
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends bubblewrap ca-certificates git util-linux
-          useradd --create-home --uid 1000 localbox
+          install --directory --mode=0700 --owner=1000 --group=1000 /tmp/localbox-home
 
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,13 +124,13 @@ jobs:
         run: pnpm build
 
       - name: Prepare unprivileged test ownership
-        run: chown --recursive localbox:localbox "$GITHUB_WORKSPACE"
+        run: chown --recursive 1000:1000 "$GITHUB_WORKSPACE"
 
       - name: Run bubblewrap conformance and security tests
-        run: runuser --user localbox -- env HOME=/home/localbox PATH="$PATH" pnpm test:bwrap
+        run: setpriv --reuid=1000 --regid=1000 --clear-groups env HOME=/tmp/localbox-home PATH="$PATH" pnpm test:bwrap
 
       - name: Run bubblewrap security smoke
-        run: runuser --user localbox -- env HOME=/home/localbox PATH="$PATH" pnpm smoke:bwrap
+        run: setpriv --reuid=1000 --regid=1000 --clear-groups env HOME=/tmp/localbox-home PATH="$PATH" pnpm smoke:bwrap
 
   integration:
     name: Docker integration
