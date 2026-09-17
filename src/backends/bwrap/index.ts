@@ -42,6 +42,7 @@ import { ProcessBackend } from "../process/index.js";
 const VIRTUAL_WORKSPACE = "/vercel/sandbox";
 const INTERNAL_NETWORK_TAG = "localbox.internal.bwrap.network-policy";
 const MAX_PROBE_OUTPUT_BYTES = 64 * 1024;
+const SETUID_MODE = 0o4000;
 const BWRAP_COMMAND_PROGRAM = String.raw`
 import { spawn } from "node:child_process";
 const child = spawn(process.argv[1], process.argv.slice(2), { stdio: "inherit" });
@@ -510,7 +511,7 @@ export class BwrapBackend implements SandboxBackend {
   }
 
   async #namespaceArguments(binary: string, policy: SandboxNetworkPolicy): Promise<string[]> {
-    const setuid = ((await lstat(binary)).mode & fsConstants.S_ISUID) !== 0;
+    const setuid = ((await lstat(binary)).mode & SETUID_MODE) !== 0;
     const sandboxUid = setuid ? process.getuid?.() ?? 0 : 0;
     const sandboxGid = setuid ? process.getgid?.() ?? 0 : 0;
     const args = [
