@@ -755,7 +755,7 @@ export class Sandbox {
     return sandboxPaginator(items, limit, start);
   }
 
-  static async create(docker: Dockerode, options: SandboxCreateOptions = {}): Promise<Sandbox> {
+  static async create(docker: Dockerode, options: SandboxCreateOptions): Promise<Sandbox> {
     return Sandbox.#create(docker, options, undefined, options.onResume);
   }
 

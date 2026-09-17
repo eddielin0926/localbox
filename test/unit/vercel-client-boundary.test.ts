@@ -6,6 +6,7 @@ import type {
   CreateSandboxRequest,
   JsonObject,
   ProcessRecord,
+  ProbeAvailabilityResult,
   RequestMetadata,
   SandboxClient,
   SandboxRecord,
@@ -63,7 +64,7 @@ class BoundaryClient implements SandboxClient {
   async probeAvailability(
     _request: Parameters<SandboxClient["probeAvailability"]>[0],
   ) {
-    return success({
+    return success<ProbeAvailabilityResult>({
       availability: {
         schemaVersion: 1,
         backend: BACKEND,

@@ -854,11 +854,6 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       const sourceRequirements = [
         operationRequirement(sourceCapability),
         operationRequirement("filesystem.read"),
-        {
-          type: "artifacts",
-          kinds: [sourceType],
-          acceptableSupport: ACCEPT_SUPPORTED,
-        } as const satisfies SandboxRequirement,
       ];
       profileTest(harness, sourceRequirements, `${sourceType} sources materialize into the workspace`, async (context) => {
         const source = harness.sourceFixtures?.[sourceType];

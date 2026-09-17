@@ -56,8 +56,8 @@ describe("sandbox capability negotiation", () => {
       },
       artifacts: {
         support: "partial",
-        constraints: { kinds: ["runtime", "oci-image"] },
-        diagnostic: "This test backend accepts runtime and OCI image artifacts only.",
+        constraints: { kinds: ["host", "oci-image"] },
+        diagnostic: "This test backend accepts host and OCI image artifacts only.",
       },
       networking: {
         support: "partial",

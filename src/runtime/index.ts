@@ -892,8 +892,11 @@ export {
   negotiateSandboxRequirements,
   SANDBOX_OPERATIONAL_CAPABILITIES,
 } from "./capabilities.js";
-export { validateBootArtifact } from "./artifacts.js";
-export type { BootArtifactValidationResult } from "./artifacts.js";
+export { validateBootArtifact, validateSandboxFrontendMetadata } from "./artifacts.js";
+export type {
+  BootArtifactValidationResult,
+  SandboxFrontendMetadataValidationResult,
+} from "./artifacts.js";
 export {
   DockerBackend,
   MANAGED_IMAGES,

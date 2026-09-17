@@ -109,5 +109,5 @@ export type RuntimeRecordCarriesBootArtifact = Assert<
   "bootArtifact" extends keyof RuntimeSandboxRecord ? true : false
 >;
 export type RuntimeSourceSelectorWasRemoved = Assert<
-  "bootSource" extends keyof RuntimeSandboxSpec | keyof RuntimeSandboxRecord ? false : true
+  "bootSource" extends (keyof RuntimeSandboxSpec | keyof RuntimeSandboxRecord) ? false : true
 >;
