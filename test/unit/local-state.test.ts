@@ -10,9 +10,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import ts from "typescript";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   EmbeddedSandboxClient,
@@ -203,34 +202,30 @@ class MemoryBackend implements SandboxBackend {
   }
 }
 
-async function childResult(moduleUrl: string, stateRoot: string, barrier: string): Promise<string> {
-  const source = `
-    import { existsSync } from "node:fs";
-    import { LocalSandboxStateConflictError, LocalSandboxStateStore } from ${JSON.stringify(moduleUrl)};
-    const [stateRoot, barrier] = process.argv.slice(1);
-    while (!existsSync(barrier)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-    const store = new LocalSandboxStateStore({ root: stateRoot });
-    try {
-      await store.acquire("cross-process", { backendId: "child", backendType: "memory" });
-      process.stdout.write("won");
-    } catch (error) {
-      if (!(error instanceof LocalSandboxStateConflictError)) throw error;
-      process.stdout.write("lost");
-    }
-  `;
-  const { promise, resolve, reject } = Promise.withResolvers<string>();
-  const child = spawn(process.execPath, ["--input-type=module", "--eval", source, stateRoot, barrier], {
-    stdio: ["ignore", "pipe", "pipe"],
+async function runClaimChild(
+  stateRoot: string,
+  barrier: string,
+  resultPath: string,
+): Promise<void> {
+  const vitestModule = fileURLToPath(import.meta.resolve("vitest"));
+  const vitestEntry = join(dirname(dirname(vitestModule)), "vitest.mjs");
+  const fixture = fileURLToPath(new URL("../fixtures/local-state-claim-child.test.ts", import.meta.url));
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const child = spawn(process.execPath, [vitestEntry, "run", fixture, "--reporter=dot"], {
+    env: {
+      ...process.env,
+      LOCALBOX_CLAIM_BARRIER: barrier,
+      LOCALBOX_CLAIM_RESULT: resultPath,
+      LOCALBOX_CLAIM_STATE_ROOT: stateRoot,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
   });
-  let stdout = "";
   let stderr = "";
-  child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => stdout += chunk);
   child.stderr.on("data", (chunk: string) => stderr += chunk);
   child.once("error", reject);
   child.once("close", (code) => {
-    if (code === 0) resolve(stdout);
+    if (code === 0) resolve();
     else reject(new Error(`Claim child exited ${code}: ${stderr}`));
   });
   return promise;
@@ -288,19 +283,19 @@ describe("LocalSandboxStateStore", () => {
   });
 
   test("allows exactly one real child process to claim a name", async () => {
-    const source = await readFile(new URL("../../src/runtime/local-state.ts", import.meta.url), "utf8");
-    const output = ts.transpileModule(source, {
-      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-    }).outputText;
-    const modulePath = join(root, "local-state.mjs");
     const stateRoot = join(root, "child-state");
     const barrier = join(root, "start");
-    await writeFile(modulePath, output, { mode: 0o600 });
-    const moduleUrl = pathToFileURL(modulePath).href;
-    const first = childResult(moduleUrl, stateRoot, barrier);
-    const second = childResult(moduleUrl, stateRoot, barrier);
+    const firstResult = join(root, "first-result");
+    const secondResult = join(root, "second-result");
+    const first = runClaimChild(stateRoot, barrier, firstResult);
+    const second = runClaimChild(stateRoot, barrier, secondResult);
     await writeFile(barrier, "go", { mode: 0o600 });
-    expect((await Promise.all([first, second])).sort()).toEqual(["lost", "won"]);
+    await Promise.all([first, second]);
+    const results = await Promise.all([
+      readFile(firstResult, "utf8"),
+      readFile(secondResult, "utf8"),
+    ]);
+    expect(results.sort()).toEqual(["lost", "won"]);
   });
 
   test("fails closed when a token does not match", async () => {
