@@ -53,6 +53,9 @@ jobs:
       - name: Validate publish contents
         run: pnpm pack --dry-run
 
+      - name: Test packed package installation
+        run: pnpm smoke:package
+
       - name: Render compatibility report
         run: pnpm compatibility:vercel
 

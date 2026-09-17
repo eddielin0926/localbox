@@ -1,6 +1,6 @@
 # Runtime client contract
 
-The pending v0.3.0 release candidate adds the public `localbox/runtime` entry point for backend-neutral values exchanged between a compatibility frontend and a Localbox runtime; this entry point is not part of the published v0.2.0 package. It is the shared contract for embedded and future remote clients and does not select a transport.
+The published v0.3 release line exposes the public `localbox/runtime` entry point for backend-neutral values exchanged between a compatibility frontend and a Localbox runtime. It is the shared contract for embedded and future remote clients and does not select a transport.
 
 ## Boundary invariants
 
