@@ -1,6 +1,6 @@
 {
   "name": "localbox",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Run cloud sandbox SDKs locally during development with Docker.",
   "license": "MIT",
   "author": "Eddie Lin",
@@ -68,10 +68,11 @@
     "test:integration": "vitest run test/integration",
     "smoke": "node examples/basic.mjs",
     "smoke:interception": "node scripts/smoke-interception.mjs",
+    "smoke:package": "node scripts/smoke-packed-install.mjs",
     "compatibility:vercel": "node scripts/report-compatibility.mjs"
   },
   "dependencies": {
-    "dockerode": "catalog:"
+    "dockerode": "5.0.1"
   },
   "devDependencies": {
     "@types/dockerode": "catalog:",

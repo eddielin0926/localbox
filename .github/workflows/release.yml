@@ -57,5 +57,8 @@ jobs:
       - name: Inspect publish contents
         run: pnpm pack --dry-run
 
+      - name: Test packed package installation
+        run: pnpm smoke:package
+
       - name: Publish to npm
         run: npm publish --access public --provenance

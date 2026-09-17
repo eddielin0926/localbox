@@ -61,9 +61,9 @@ Maintainers may ask for changes before merging. Reviews focus on correctness, co
 
 ## Release process
 
-Maintainers release from a clean `main` commit after its required CI checks pass:
+Maintainers release from a clean commit on `main` or the applicable maintenance branch after its required CI checks pass:
 
-1. Update `package.json` and user-facing compatibility documentation in a focused release pull request.
+1. Update `package.json` and user-facing compatibility documentation in a focused release pull request, then run `pnpm smoke:package` to install the packed archive in a clean external pnpm consumer.
 2. Run the manual `Publish Vercel-compatible images` workflow when managed-image sources or tags change, then confirm every image referenced by the package is publicly pullable.
 3. Confirm the npm `localbox` package trusts `.github/workflows/release.yml` through the `npm` GitHub environment, or configure the `NPM_TOKEN` environment secret for the first publish only.
 4. Create a GitHub release whose tag is exactly `v` plus the package version. Publishing the release triggers the npm workflow.
