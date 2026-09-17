@@ -228,7 +228,8 @@ function validateRequirement(value: unknown): value is SandboxRequirement {
 function stableJson(value: JsonValue): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value) as string;
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key] as JsonValue)}`).join(",")}}`;
+  const object = value as JsonObject;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key] as JsonValue)}`).join(",")}}`;
 }
 
 function requirementKey(requirement: SandboxRequirement): string {

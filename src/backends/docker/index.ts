@@ -163,7 +163,7 @@ const CAPABILITIES = Object.freeze({
     constraints: { operations: [] },
     diagnostic: "The Docker backend cannot create, restore, or clone snapshots; use an OCI image or source artifact instead.",
   },
-}) satisfies SandboxCapabilities;
+} as const satisfies SandboxCapabilities);
 
 
 interface DeadlineScope {

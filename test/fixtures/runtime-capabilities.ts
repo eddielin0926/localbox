@@ -90,12 +90,15 @@ export const TEST_CAPABILITIES = {
 export function testCapabilitiesWithOperationSupport(
   support: Readonly<Partial<Record<SandboxOperationalCapability, CapabilitySupport>>>,
 ): SandboxCapabilities {
-  const operations = { ...TEST_CAPABILITIES.operations } as Record<
+  const entries = Object.entries(TEST_CAPABILITIES.operations) as [
     SandboxOperationalCapability,
-    SandboxCapabilities["operations"][SandboxOperationalCapability]
-  >;
-  for (const [name, classification] of Object.entries(support) as [SandboxOperationalCapability, CapabilitySupport][]) {
-    operations[name] = { ...operations[name], support: classification } as typeof operations[typeof name];
-  }
+    SandboxCapabilities["operations"][SandboxOperationalCapability],
+  ][];
+  const operations = Object.fromEntries(
+    entries.map(([name, capability]) => [
+      name,
+      { ...capability, support: support[name] ?? capability.support },
+    ]),
+  ) as unknown as SandboxCapabilities["operations"];
   return { ...TEST_CAPABILITIES, operations };
 }
