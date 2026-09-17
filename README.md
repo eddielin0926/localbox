@@ -4,7 +4,7 @@ Run cloud sandbox SDKs locally during development with Docker.
 
 Localbox is an open-source local development runtime for applications that depend on cloud sandbox SDKs. Its goal is to let those applications run locally with zero or near-zero application-code changes, initially for Vercel Sandbox on Docker.
 
-The published v0.2.0 release provides the Vercel-compatible `localbox/vercel` API and an explicit, opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. The repository's pending v0.3.0 release candidate adds the public backend-neutral `localbox/runtime` entry point while preserving the v0.2 compatibility and interception behavior. No hosted Localbox service, credentials, or configuration file is required for either local path.
+The published v0.2.0 release provides the Vercel-compatible `localbox/vercel` API and an explicit, opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. The pending runtime releases add the public backend-neutral `localbox/runtime` entry point and a v0.4 development contract for explicit boot artifacts and availability diagnostics while preserving the v0.2 compatibility and interception behavior. No hosted Localbox service, credentials, or configuration file is required for either local path.
 
 See [ROADMAP.md](ROADMAP.md) for planned compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
 
@@ -16,6 +16,8 @@ See [ROADMAP.md](ROADMAP.md) for planned compatibility frontends, isolation back
 - Keep a sandbox filesystem across stops with persistent containers.
 - Expose container ports on loopback-only host URLs.
 - Use Vercel-shaped types and behavior for the supported surface.
+- Describe host, directory, OCI image, disk image, and snapshot boot inputs with JSON-safe trust and mutability declarations.
+- Probe Docker or trusted-host process prerequisites without allocating sandboxes, pulling images, or installing software.
 
 ## Prerequisites
 
@@ -124,7 +126,7 @@ Framework adapters, when a proven bypass requires one, are optional toolchain in
 
 ## API reference
 
-Application code continues to use `localbox/vercel` exactly as it did in v0.2. The pending v0.3.0 package also exports `localbox/runtime` for the transport-safe `SandboxClient` contract, `EmbeddedSandboxClient`, backend interface, and `DockerBackend`. The default application composition remains an embedded client bound to one Docker backend. See [RUNTIME.md](RUNTIME.md) for the boundary, command and filesystem ownership, capability-driven conformance profiles, and construction details.
+Application code continues to use `localbox/vercel` exactly as it did in v0.2. The runtime package exports the transport-safe `SandboxClient` contract, `EmbeddedSandboxClient`, backend interface, `DockerBackend`, and opt-in `ProcessBackend`. The default application composition remains an embedded client bound to one Docker backend. Vercel runtime/image selectors are resolved by the frontend to one OCI boot artifact before that boundary; they are never backend fallback instructions. See [RUNTIME.md](RUNTIME.md) for the artifact schema, availability diagnostics, state migration, command/filesystem ownership, capability-driven conformance profiles, and construction details.
 
 ### Sandbox creation options
 
@@ -261,16 +263,19 @@ docker ps -a --filter label=dev.localbox.name=<sandbox-name>
 
 ## Security
 
-Localbox is intended for local development and trusted workloads. Docker containers share the host kernel and are not a safe isolation boundary for hostile multi-tenant code. Exposed ports bind only to `127.0.0.1`, and containers run with Docker's `no-new-privileges` security option.
+Localbox is intended for local development and trusted workloads. Docker containers share the host kernel and are not a safe isolation boundary for hostile multi-tenant code. Exposed ports bind only to `127.0.0.1`, and containers run with Docker's `no-new-privileges` security option. Arbitrary OCI references remain supported, but `trust` and `mutability` artifact fields describe provenance expectations; Localbox does not verify a caller's trust assertion, and those values do not strengthen Docker isolation or grant managed-image privileges.
+
+`ProcessBackend` executes directly as the current OS user with shared host files, credentials, processes, networking, and resources. Its private workspace is bookkeeping and path containment for Localbox file operations, not a sandbox. Use it only for explicitly trusted single-user code. Directory, disk-image, and snapshot artifacts are modeled for future backends but are not executed today; Localbox makes no portability, upload/storage, VM-isolation, or restore guarantee for them.
 
 ## Troubleshooting
 
 | Error | Action |
 | --- | --- |
-| `DockerUnavailableError` | Start Docker and retry. |
+| Docker availability diagnostic | Start Docker, verify the selected context/socket, and grant the current user endpoint access as directed by the diagnostic. |
 | `UnsupportedImageError` | Use an image containing `node` and `/bin/sh`. |
 | `PortNotExposedError` | Include the TCP port in `Sandbox.create({ ports })`. |
 | Image pull failure | Check the image name, registry access, and Docker credentials. |
+| Process availability diagnostic | Use POSIX, configure an absolute non-symlink private root whose nearest existing parent is accessible, and run from a working Node installation. |
 | `LOCALBOX_UNSUPPORTED_RUNTIME` | Switch to Node.js 22.12 or newer and retry. The wrapped command was not launched. |
 | `LOCALBOX_HOOK_SETUP_FAILED` | Inspect the preserved cause, repair the Localbox installation or Node hook configuration, and retry. The application was not started and the provider was not used as a fallback. |
 | Confirmed `LOCALBOX_TOOLCHAIN_BYPASS` | The named toolchain path does not participate in the Node hook. Use an explicit `localbox/vercel` import or an available opt-in adapter; absence of an observed provider import alone does not prove a bypass. |

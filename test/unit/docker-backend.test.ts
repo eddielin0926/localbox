@@ -1,10 +1,5 @@
 import { describe, expect, test } from "vitest";
 import { DockerBackend } from "../../src/backends/docker/index.js";
-import { InvalidSandboxOptionsError } from "../../src/backends/docker/errors.js";
-import {
-  MANAGED_IMAGES,
-  resolveSandboxImage,
-} from "../../src/backends/docker/managed-images.js";
 import { dockerContainerName } from "../../src/backends/docker/sandbox.js";
 
 describe("DockerBackend boundary", () => {
@@ -69,7 +64,7 @@ describe("DockerBackend boundary", () => {
       },
       artifacts: {
         support: "partial",
-        constraints: { kinds: ["runtime", "oci-image", "git", "tarball"] },
+        constraints: { kinds: ["oci-image"] },
       },
       persistence: {
         support: "native",
@@ -120,19 +115,42 @@ describe("DockerBackend boundary", () => {
     }
   });
 
-  test("resolves managed image aliases without rewriting custom OCI images", () => {
-    expect(resolveSandboxImage({})).toBe(MANAGED_IMAGES.universal);
-    expect(resolveSandboxImage({ runtime: "node24" })).toBe(MANAGED_IMAGES.node24);
-    expect(resolveSandboxImage({ image: "vercel/sandbox/node:22" })).toBe(MANAGED_IMAGES.node22);
-    expect(resolveSandboxImage({ image: "vcr.vercel.com/vercel/sandbox/python:3.14" })).toBe(
-      MANAGED_IMAGES.python314,
-    );
-    expect(resolveSandboxImage({ image: "registry.example.test/team/image:v1" })).toBe(
-      "registry.example.test/team/image:v1",
-    );
-    expect(() => resolveSandboxImage({ image: "vercel/sandbox/node:999" })).toThrow(
-      InvalidSandboxOptionsError,
-    );
+  test("rejects non-OCI boot artifacts before contacting Docker", async () => {
+    const result = await new DockerBackend().createSandbox({
+      requestId: "request-host-artifact",
+      idempotencyKey: "request-host-artifact",
+      deadline: null,
+      sandboxId: "host-artifact",
+      backend: null,
+      requirements: [],
+      spec: {
+        name: "host-artifact",
+        bootArtifact: {
+          kind: "host",
+          locator: { type: "host", selector: "current" },
+          trust: "trusted",
+          mutability: "mutable",
+        },
+        frontendMetadata: null,
+        source: null,
+        persistent: false,
+        timeoutMs: 10_000,
+        environment: {},
+        tags: {},
+        ports: [],
+        networkPolicy: "allow-all",
+        resources: { vcpus: null, memoryBytes: null },
+        region: null,
+        failoverRegions: [],
+      },
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        category: "failed-precondition",
+        code: "LOCALBOX_UNSUPPORTED_CAPABILITY",
+      },
+    });
   });
 
   test("derives stable collision-resistant container names", () => {

@@ -10,6 +10,10 @@ import type {
   FileSystem as LocalFileSystem,
   Sandbox as LocalSandbox,
 } from "../../src/vercel/index.js";
+import type {
+  SandboxRecord as RuntimeSandboxRecord,
+  SandboxSpec as RuntimeSandboxSpec,
+} from "../../src/runtime/index.js";
 
 type Assert<T extends true> = T;
 
@@ -96,4 +100,11 @@ export type CreateCallbackReceivesLocalSandbox = Assert<
 >;
 export type CreateCallbackReturnsPromise = Assert<
   LocalResumeCallback extends (sandbox: LocalSandbox) => Promise<void> ? true : false
+>;
+
+export type RuntimeSpecCarriesBootArtifact = Assert<
+  "bootArtifact" extends keyof RuntimeSandboxSpec ? true : false
+>;
+export type RuntimeRecordCarriesBootArtifact = Assert<
+  "bootArtifact" extends keyof RuntimeSandboxRecord ? true : false
 >;

@@ -43,7 +43,7 @@ const DOMAIN_NAMES = [
 ] as const;
 const ISOLATION_LEVELS = ["process", "shared-kernel-container", "namespace-sandbox", "virtual-machine"] as const;
 const ISOLATION_TENANCIES = ["trusted", "single-tenant", "multi-tenant"] as const;
-const ARTIFACT_KINDS = ["runtime", "oci-image", "git", "tarball", "directory", "disk-image", "snapshot"] as const;
+const ARTIFACT_KINDS = ["host", "directory", "oci-image", "disk-image", "snapshot"] as const;
 const PERSISTENCE_SCOPES = ["sandbox-lifecycle", "backend-restart"] as const;
 const RECOVERY_SCOPES = ["sandbox", "process"] as const;
 const NETWORK_MODES = ["allow-all", "deny-all", "custom"] as const;

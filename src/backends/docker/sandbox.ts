@@ -3,7 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type Dockerode from "dockerode";
-import type { RawCommand } from "../../runtime/index.js";
+import {
+  validateBootArtifact,
+  type OciImageBootArtifact,
+  type RawCommand,
+} from "../../runtime/index.js";
 import { startRawCommand, type StartRawCommandOptions } from "./command.js";
 import {
   dockerStatus,
@@ -26,7 +30,6 @@ import {
   UnsupportedImageError,
   UnsupportedSandboxCapabilityError,
 } from "./errors.js";
-import { resolveSandboxImage } from "./managed-images.js";
 import type {
   SandboxCreateOptions,
   SandboxGetOptions,
@@ -129,6 +132,7 @@ type MaterializableSource = Exclude<SandboxSource, { type: "snapshot" }>;
 interface NormalizedCreateOptions {
   name: string;
   image: string;
+  bootArtifact: OciImageBootArtifact;
   runtime?: string;
   ports: number[];
   timeout: number;
@@ -148,6 +152,7 @@ interface NormalizedCreateOptions {
 interface SandboxMetadata {
   name: string;
   image: string;
+  bootArtifact: OciImageBootArtifact;
   runtime?: string;
   ports: number[];
   timeout: number;
@@ -218,14 +223,15 @@ function normalizeSource(source: SandboxSource | undefined): MaterializableSourc
   }
   throw new InvalidSandboxOptionsError("Sandbox source type is invalid.");
 }
-
-function normalizeCreateOptions(options: SandboxCreateOptions = {}): NormalizedCreateOptions {
+function normalizeCreateOptions(options: SandboxCreateOptions): NormalizedCreateOptions {
   const name = options.name ?? `localbox-${randomUUID()}`;
   validateName(name);
-  const image = resolveSandboxImage({
-    ...(options.image === undefined ? {} : { image: options.image }),
-    ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
-  });
+  const validation = validateBootArtifact(options.bootArtifact);
+  if (!validation.ok || validation.artifact.kind !== "oci-image") {
+    throw new InvalidSandboxOptionsError("Docker sandbox boot artifact must be a valid OCI image.");
+  }
+  const bootArtifact = validation.artifact;
+  const image = bootArtifact.locator.reference;
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
   if (!Number.isFinite(timeout) || !Number.isInteger(timeout) || timeout <= 0) {
     throw new InvalidSandboxOptionsError("Sandbox timeout must be a positive finite integer in milliseconds.");
@@ -301,6 +307,7 @@ function normalizeCreateOptions(options: SandboxCreateOptions = {}): NormalizedC
   return {
     name,
     image,
+    bootArtifact,
     ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
     ports,
     timeout,
@@ -459,6 +466,41 @@ async function materializeSource(
   });
 }
 
+function bootArtifactFromLabels(
+  labels: Readonly<Record<string, string>>,
+  image: string,
+): OciImageBootArtifact {
+  const serialized = labels[`${LABEL_PREFIX}.bootArtifact`];
+  if (serialized === undefined) {
+    const digestMatch = image.match(/@sha256:([a-f0-9]{64})$/);
+    return {
+      kind: "oci-image",
+      locator: { type: "oci-reference", reference: image },
+      digest: digestMatch === null
+        ? null
+        : { algorithm: "sha256", value: digestMatch[1]! },
+      trust: "untrusted",
+      mutability: digestMatch === null ? "mutable" : "immutable",
+      platform: null,
+    };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    throw new InvalidSandboxOptionsError("Docker sandbox boot artifact metadata is corrupt.");
+  }
+  const validation = validateBootArtifact(value);
+  if (
+    !validation.ok ||
+    validation.artifact.kind !== "oci-image" ||
+    validation.artifact.locator.reference !== image
+  ) {
+    throw new InvalidSandboxOptionsError("Docker sandbox boot artifact metadata is invalid.");
+  }
+  return validation.artifact;
+}
+
 function metadataFromInspect(name: string, info: Dockerode.ContainerInspectInfo): SandboxMetadata {
   const labels = info.Config.Labels;
   if (labels[`${LABEL_PREFIX}.managed`] !== "true" || labels[`${LABEL_PREFIX}.name`] !== name) {
@@ -470,9 +512,11 @@ function metadataFromInspect(name: string, info: Dockerode.ContainerInspectInfo)
   const failoverRegions = JSON.parse(labels[`${LABEL_PREFIX}.failoverRegions`] ?? "[]") as string[];
   const nanoCpus = info.HostConfig.NanoCpus ?? 0;
   const memoryBytes = info.HostConfig.Memory ?? 0;
+  const image = labels[`${LABEL_PREFIX}.image`] ?? info.Config.Image;
   return {
     name,
-    image: labels[`${LABEL_PREFIX}.image`] ?? info.Config.Image,
+    image,
+    bootArtifact: bootArtifactFromLabels(labels, image),
     ...(labels[`${LABEL_PREFIX}.runtime`] === undefined
       ? {}
       : { runtime: labels[`${LABEL_PREFIX}.runtime`] }),
@@ -572,6 +616,7 @@ function listItemFromInspect(info: Dockerode.ContainerInspectInfo): SandboxListI
     ...(nanoCpus > 0 ? { vcpus: nanoCpus / 1_000_000_000 } : {}),
     ...(memoryBytes > 0 ? { memory: memoryBytes / 1_048_576 } : {}),
     image: metadata.image,
+    bootArtifact: metadata.bootArtifact,
     ...(metadata.runtime === undefined ? {} : { runtime: metadata.runtime }),
     ports: [...metadata.ports],
     endpoints,
@@ -619,6 +664,7 @@ export class Sandbox {
   readonly name: string;
   readonly persistent: boolean;
   readonly image: string;
+  readonly bootArtifact: OciImageBootArtifact;
   readonly runtime: string | undefined;
   readonly ports: readonly number[];
   readonly timeout: number;
@@ -651,6 +697,7 @@ export class Sandbox {
     this.name = metadata.name;
     this.persistent = metadata.persistent;
     this.image = metadata.image;
+    this.bootArtifact = metadata.bootArtifact;
     this.runtime = metadata.runtime;
     this.ports = Object.freeze([...metadata.ports]);
     this.timeout = metadata.timeout;
@@ -708,7 +755,7 @@ export class Sandbox {
     return sandboxPaginator(items, limit, start);
   }
 
-  static async create(docker: Dockerode, options: SandboxCreateOptions = {}): Promise<Sandbox> {
+  static async create(docker: Dockerode, options: SandboxCreateOptions): Promise<Sandbox> {
     return Sandbox.#create(docker, options, undefined, options.onResume);
   }
 
@@ -784,6 +831,7 @@ export class Sandbox {
           [`${LABEL_PREFIX}.name`]: normalized.name,
           [`${LABEL_PREFIX}.persistent`]: String(normalized.persistent),
           [`${LABEL_PREFIX}.image`]: normalized.image,
+          [`${LABEL_PREFIX}.bootArtifact`]: JSON.stringify(normalized.bootArtifact),
           [`${LABEL_PREFIX}.timeout`]: String(normalized.timeout),
           [`${LABEL_PREFIX}.created`]: createdAt.toISOString(),
           [`${LABEL_PREFIX}.ports`]: JSON.stringify(normalized.ports),

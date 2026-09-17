@@ -43,7 +43,7 @@ export const TEST_CAPABILITIES = {
   },
   artifacts: {
     support: "native",
-    constraints: { kinds: ["runtime", "oci-image", "git", "tarball", "directory", "disk-image", "snapshot"] },
+    constraints: { kinds: ["host", "directory", "oci-image", "disk-image", "snapshot"] },
     diagnostic: "Test backend accepts every artifact kind.",
   },
   persistence: {
@@ -86,6 +86,22 @@ export const TEST_CAPABILITIES = {
     diagnostic: "Test backend supports every snapshot operation.",
   },
 } as const satisfies SandboxCapabilities;
+
+export const TEST_OCI_ARTIFACT = {
+  kind: "oci-image",
+  locator: { type: "oci-reference", reference: "registry.example.test/localbox:test" },
+  digest: null,
+  trust: "untrusted",
+  mutability: "mutable",
+  platform: null,
+} as const;
+
+export const TEST_HOST_ARTIFACT = {
+  kind: "host",
+  locator: { type: "host", selector: "current" },
+  trust: "trusted",
+  mutability: "mutable",
+} as const;
 
 export function testCapabilitiesWithOperationSupport(
   support: Readonly<Partial<Record<SandboxOperationalCapability, CapabilitySupport>>>,

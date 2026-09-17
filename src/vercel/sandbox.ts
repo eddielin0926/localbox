@@ -4,8 +4,10 @@ import { dirname, resolve as resolveLocalPath } from "node:path";
 import { posix } from "node:path";
 import { Readable } from "node:stream";
 import type {
+  BootArtifact,
   ClientResult,
   SandboxClient,
+  SandboxFrontendMetadata,
   SandboxRecord,
   SandboxRequirement,
   SandboxSource as RuntimeSandboxSource,
@@ -28,6 +30,7 @@ import {
   SandboxNotFoundError,
   UnsupportedSandboxCapabilityError,
 } from "./errors.js";
+import { resolveVercelBootArtifact } from "./boot-artifact.js";
 import { createFileSystem, FileSystem } from "./filesystem.js";
 import type {
   SandboxCreateOptions,
@@ -45,7 +48,6 @@ import type {
 
 const DEFAULT_TIMEOUT = 300_000;
 const WORKSPACE = "/vercel/sandbox";
-const DEFAULT_IMAGE = "vcr.vercel.com/vercel/sandbox/universal";
 const SUPPORTED_IMPLEMENTATIONS = ["native", "emulated", "partial"] as const;
 
 interface SignalOptions {
@@ -58,9 +60,8 @@ interface DownloadOptions extends SignalOptions {
 
 interface FrontendCreateSpec {
   readonly name: string;
-  readonly bootSource:
-    | { readonly type: "runtime"; readonly runtime: string }
-    | { readonly type: "image"; readonly image: string };
+  readonly bootArtifact: BootArtifact;
+  readonly frontendMetadata: SandboxFrontendMetadata;
   readonly source: RuntimeSandboxSource | null;
   readonly persistent: boolean;
   readonly timeoutMs: number;
@@ -119,11 +120,13 @@ function normalizeCreateOptions(options: SandboxCreateOptions = {}): FrontendCre
   if (typeof options.networkPolicy === "object") {
     throw new UnsupportedSandboxCapabilityError("custom network policies");
   }
-  if (options.image !== undefined && options.runtime !== undefined) {
-    throw new InvalidSandboxOptionsError("Choose either image or runtime, not both.");
-  }
   throwIfAborted(options.signal);
 
+  const boot = resolveVercelBootArtifact({
+    ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
+    ...(options.image === undefined ? {} : { image: options.image }),
+  });
+  if (!boot.ok) throw new InvalidSandboxOptionsError(boot.message);
   const source = runtimeSource(options.source);
   const persistent = options.persistent ?? true;
   const networkPolicy = options.networkPolicy ?? "allow-all";
@@ -132,10 +135,7 @@ function normalizeCreateOptions(options: SandboxCreateOptions = {}): FrontendCre
     throw new UnsupportedSandboxCapabilityError("simultaneous deny-all networking and exposed ports");
   }
   const vcpus = options.resources?.vcpus ?? null;
-  const artifactKinds = [
-    options.runtime !== undefined ? "runtime" : "oci-image",
-    ...(source === null ? [] : [source.type]),
-  ] as const;
+  const artifactKinds = ["oci-image"] as const;
   const requirements: SandboxRequirement[] = [
     { type: "operation", operation: "command.start", acceptableSupport: SUPPORTED_IMPLEMENTATIONS },
     { type: "operation", operation: "command.detached", acceptableSupport: SUPPORTED_IMPLEMENTATIONS },
@@ -172,9 +172,8 @@ function normalizeCreateOptions(options: SandboxCreateOptions = {}): FrontendCre
 
   return {
     name: options.name ?? `localbox-${randomUUID()}`,
-    bootSource: options.runtime !== undefined
-      ? { type: "runtime", runtime: options.runtime }
-      : { type: "image", image: options.image ?? DEFAULT_IMAGE },
+    bootArtifact: boot.artifact,
+    frontendMetadata: boot.metadata,
     source,
     persistent,
     timeoutMs: options.timeout ?? DEFAULT_TIMEOUT,
@@ -210,7 +209,8 @@ function listItem(record: SandboxRecord): SandboxListItem {
     ...(record.resources.memoryBytes === null
       ? {}
       : { memory: record.resources.memoryBytes / 1_048_576 }),
-    image: record.bootSource.type === "image" ? record.bootSource.image : "",
+    image: record.frontendMetadata?.image ??
+      (record.bootArtifact.kind === "oci-image" ? record.bootArtifact.locator.reference : ""),
     timeout: record.timeoutMs,
     statusUpdatedAt: record.statusUpdatedAt,
     cwd: WORKSPACE,
@@ -277,11 +277,14 @@ export class Sandbox {
   }
 
   get image(): string {
-    return this.#record.bootSource.type === "image" ? this.#record.bootSource.image : "";
+    return this.#record.frontendMetadata?.image ??
+      (this.#record.bootArtifact.kind === "oci-image"
+        ? this.#record.bootArtifact.locator.reference
+        : "");
   }
 
   get runtime(): string | undefined {
-    return this.#record.runtime ?? undefined;
+    return this.#record.frontendMetadata?.runtime ?? undefined;
   }
 
   get ports(): readonly number[] {
@@ -360,7 +363,8 @@ export class Sandbox {
       requirements: normalized.requirements,
       spec: {
         name: normalized.name,
-        bootSource: normalized.bootSource,
+        bootArtifact: normalized.bootArtifact,
+        frontendMetadata: normalized.frontendMetadata,
         source: normalized.source,
         persistent: normalized.persistent,
         timeoutMs: normalized.timeoutMs,

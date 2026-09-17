@@ -47,7 +47,7 @@ export const BACKEND_CONFORMANCE_COVERAGE = {
   "raw-command.input": ["filesystem writes", "filesystem cancellation"],
   "raw-command.managed-filesystem-owner": ["filesystem ownership"],
   isolation: ["command execution security boundary"],
-  artifacts: ["git source materialization", "tarball source materialization"],
+  artifacts: ["boot artifact acceptance"],
   persistence: ["persistent lifecycle"],
   recovery: ["persistent lifecycle", "command cleanup"],
   networking: ["allow-all networking", "deny-all networking"],
@@ -75,7 +75,8 @@ const RESOURCE_REQUIREMENT = {
 
 export type SandboxSpecOverrides = Partial<Pick<
   SandboxSpec,
-  | "bootSource"
+  | "bootArtifact"
+  | "frontendMetadata"
   | "source"
   | "persistent"
   | "timeoutMs"
@@ -307,6 +308,32 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       expect(report.covered).toEqual(ALL_CAPABILITIES);
       for (const capability of report.covered) {
         expect(BACKEND_CONFORMANCE_COVERAGE[capability].length).toBeGreaterThan(0);
+      }
+    });
+
+    profileTest(harness, [], "availability probes expose a transport-safe backend-identity diagnostic", async ({ client }) => {
+      const result = unwrap(await client.probeAvailability(
+        requestMetadata(`availability:${harness.name}`, Date.now() + 10_000),
+      ));
+      expect(result.availability).toMatchObject({
+        schemaVersion: 1,
+        backend: {
+          backendId: expect.any(String),
+          backendType: expect.any(String),
+        },
+        status: expect.stringMatching(/^(available|unavailable)$/),
+        checkedAt: expect.any(Number),
+      });
+      expect(result.availability.diagnostics.length).toBeGreaterThan(0);
+      expect(JSON.parse(JSON.stringify(result))).toEqual(result);
+      for (const diagnostic of result.availability.diagnostics) {
+        expect(diagnostic).toMatchObject({
+          code: expect.any(String),
+          severity: expect.stringMatching(/^(info|warning|error)$/),
+          message: expect.any(String),
+          action: expect.any(String),
+          details: { type: expect.any(String) },
+        });
       }
     });
 
@@ -827,11 +854,6 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       const sourceRequirements = [
         operationRequirement(sourceCapability),
         operationRequirement("filesystem.read"),
-        {
-          type: "artifacts",
-          kinds: [sourceType],
-          acceptableSupport: ACCEPT_SUPPORTED,
-        } as const satisfies SandboxRequirement,
       ];
       profileTest(harness, sourceRequirements, `${sourceType} sources materialize into the workspace`, async (context) => {
         const source = harness.sourceFixtures?.[sourceType];

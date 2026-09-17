@@ -32,13 +32,17 @@ import type {
   GetEndpointResult,
   GetSandboxResult,
   ListSandboxesResult,
+  ProbeAvailabilityResult,
   RequestMetadata,
   SandboxBackend,
   SandboxRecord,
   StartRawCommandResult,
   StopSandboxResult,
 } from "../../src/runtime/index.js";
-import { TEST_CAPABILITIES } from "../fixtures/runtime-capabilities.js";
+import {
+  TEST_CAPABILITIES,
+  TEST_OCI_ARTIFACT,
+} from "../fixtures/runtime-capabilities.js";
 
 const BACKEND = { backendId: "local-state-test", backendType: "memory" } as const;
 const DEAD_OWNER = {
@@ -83,8 +87,8 @@ function sandboxRecord(name: string, status: SandboxRecord["status"] = "running"
     name,
     status,
     persistent: true,
-    bootSource: { type: "image", image: "localbox:test" },
-    runtime: "node24",
+    bootArtifact: TEST_OCI_ARTIFACT,
+    frontendMetadata: null,
     backend: BACKEND,
     createdAt: now - 1_000,
     updatedAt: now,
@@ -114,7 +118,8 @@ function createRequest(
     requirements: [],
     spec: {
       name,
-      bootSource: { type: "runtime", runtime: "node24" },
+      bootArtifact: TEST_OCI_ARTIFACT,
+      frontendMetadata: null,
       source: null,
       persistent: true,
       timeoutMs: 300_000,
@@ -137,6 +142,29 @@ class MemoryBackend implements SandboxBackend {
 
   constructor(sandboxes = new Map<string, SandboxRecord>()) {
     this.sandboxes = sandboxes;
+  }
+
+  probeAvailability(
+    _request: Parameters<SandboxBackend["probeAvailability"]>[0],
+  ): Promise<ClientResult<ProbeAvailabilityResult>> {
+    return Promise.resolve({
+      ok: true,
+      value: {
+        availability: {
+          schemaVersion: 1,
+          backend: BACKEND,
+          status: "available",
+          checkedAt: Date.now(),
+          diagnostics: [{
+            code: "PROCESS_PREREQUISITES_AVAILABLE",
+            severity: "info",
+            message: "The test backend is available.",
+            action: "No action is required.",
+            details: { type: "process-runtime", prerequisite: "node-executable" },
+          }],
+        },
+      },
+    });
   }
 
   async createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
@@ -318,6 +346,70 @@ describe("LocalSandboxStateStore", () => {
       if (record?.kind === "active") expect(["running", "stopped"]).toContain(record.sandbox.status);
     }
     expect(await store.read("atomic")).toMatchObject({ kind: "active", sandbox: { status: "stopped" } });
+  });
+
+  test("migrates exact schema-v1 image and host records and rejects ambiguous runtimes", async () => {
+    const name = "schema-migration";
+    const store = new LocalSandboxStateStore({ root });
+    const claim = await store.acquire(name, BACKEND);
+    await store.commit(claim, sandboxRecord(name));
+    const statePath = join(root, "sandboxes", claim.digest, "state.json");
+    const current = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    const currentSandbox = current.sandbox as Record<string, unknown>;
+    const legacyCommon = { ...currentSandbox };
+    delete legacyCommon.bootArtifact;
+    delete legacyCommon.frontendMetadata;
+
+    await writeFile(statePath, JSON.stringify({
+      ...current,
+      schemaVersion: 1,
+      sandbox: {
+        ...legacyCommon,
+        bootSource: { type: "image", image: "registry.example.test/team/image:v1" },
+        runtime: "node24",
+      },
+    }), { mode: 0o600 });
+    expect(await store.read(name)).toMatchObject({
+      schemaVersion: 2,
+      sandbox: {
+        bootArtifact: {
+          kind: "oci-image",
+          locator: { reference: "registry.example.test/team/image:v1" },
+          trust: "untrusted",
+          mutability: "mutable",
+        },
+      },
+    });
+
+    await writeFile(statePath, JSON.stringify({
+      ...current,
+      schemaVersion: 1,
+      sandbox: {
+        ...legacyCommon,
+        bootSource: { type: "runtime", runtime: "host" },
+        runtime: "host",
+      },
+    }), { mode: 0o600 });
+    expect(await store.read(name)).toMatchObject({
+      schemaVersion: 2,
+      sandbox: {
+        bootArtifact: {
+          kind: "host",
+          locator: { type: "host", selector: "current" },
+        },
+      },
+    });
+
+    await writeFile(statePath, JSON.stringify({
+      ...current,
+      schemaVersion: 1,
+      sandbox: {
+        ...legacyCommon,
+        bootSource: { type: "runtime", runtime: "node24" },
+        runtime: "node24",
+      },
+    }), { mode: 0o600 });
+    expect(await store.inspect(name)).toMatchObject({ status: "corrupt" });
   });
 
   test("ignores interrupted temporary files and repairs corrupt canonical state", async () => {

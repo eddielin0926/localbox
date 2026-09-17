@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { FilesystemBridge } from "./filesystem-bridge.js";
 import { negotiateSandboxRequirements } from "./capabilities.js";
+import { validateBootArtifact, validateSandboxFrontendMetadata } from "./artifacts.js";
 import {
   isLocalStateOwnerAlive,
   LocalSandboxOwnershipError,
@@ -14,6 +15,10 @@ import type {
   LocalSandboxStateRecord,
 } from "./local-state.js";
 import type {
+  ArtifactKind,
+  AvailabilityDiagnostic,
+  AvailabilityDiagnosticCode,
+  BackendAvailability,
   BackendReference,
   ClientFailure,
   ClientResult,
@@ -35,6 +40,8 @@ import type {
   MutationMetadata,
   MakeDirectoryRequest,
   MakeDirectoryResult,
+  ProbeAvailabilityRequest,
+  ProbeAvailabilityResult,
   ProcessRecord,
   ProcessSignal,
   RawCommand,
@@ -51,6 +58,7 @@ import type {
   SandboxErrorDetails,
   SandboxCapabilities,
   SandboxRecord,
+  SandboxRequirement,
   SandboxRequirementIssue,
   SignalProcessRequest,
   SignalProcessResult,
@@ -100,6 +108,7 @@ const REQUIREMENT_ISSUE_KINDS: Record<SandboxRequirementIssue["kind"], true> = {
 
 
 type BackendOperation =
+  | "probeAvailability"
   | "createSandbox"
   | "getSandbox"
   | "listSandboxes"
@@ -188,6 +197,99 @@ function isBackendReference(value: unknown): value is BackendReference {
     typeof value.backendId === "string" &&
     typeof value.backendType === "string"
   );
+}
+
+const AVAILABILITY_CODES: Record<AvailabilityDiagnosticCode, true> = {
+  DOCKER_DAEMON_AVAILABLE: true,
+  DOCKER_SOCKET_NOT_FOUND: true,
+  DOCKER_SOCKET_PERMISSION_DENIED: true,
+  DOCKER_DAEMON_UNREACHABLE: true,
+  PROCESS_PREREQUISITES_AVAILABLE: true,
+  PROCESS_PLATFORM_UNSUPPORTED: true,
+  PROCESS_ROOT_INVALID: true,
+  PROCESS_ROOT_INACCESSIBLE: true,
+  PROCESS_NODE_UNAVAILABLE: true,
+  PROCESS_SUPERVISOR_INVALID: true,
+};
+
+const DOCKER_AVAILABILITY_REASONS: Partial<Record<AvailabilityDiagnosticCode, string>> = {
+  DOCKER_DAEMON_AVAILABLE: "available",
+  DOCKER_SOCKET_NOT_FOUND: "not-found",
+  DOCKER_SOCKET_PERMISSION_DENIED: "permission-denied",
+  DOCKER_DAEMON_UNREACHABLE: "unreachable",
+};
+
+const PROCESS_AVAILABILITY_PREREQUISITES:
+  Partial<Record<AvailabilityDiagnosticCode, string>> = {
+    PROCESS_PREREQUISITES_AVAILABLE: "node-executable",
+    PROCESS_NODE_UNAVAILABLE: "node-executable",
+    PROCESS_SUPERVISOR_INVALID: "supervisor-program",
+  };
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === expected.length &&
+    actual.every((key) => expected.includes(key));
+}
+
+function isAvailabilityDiagnostic(value: unknown): value is AvailabilityDiagnostic {
+  if (!isPlainObject(value) ||
+      !hasExactKeys(value, ["code", "severity", "message", "action", "details"]) ||
+      typeof value.code !== "string" ||
+      !Object.hasOwn(AVAILABILITY_CODES, value.code) ||
+      (value.severity !== "info" && value.severity !== "warning" && value.severity !== "error") ||
+      typeof value.message !== "string" || value.message.length === 0 ||
+      typeof value.action !== "string" || value.action.length === 0 ||
+      !isPlainObject(value.details)) return false;
+  const info = value.code === "DOCKER_DAEMON_AVAILABLE" ||
+    value.code === "PROCESS_PREREQUISITES_AVAILABLE";
+  if (value.severity !== (info ? "info" : "error")) return false;
+  const details = value.details;
+  const dockerReason = DOCKER_AVAILABILITY_REASONS[
+    value.code as AvailabilityDiagnosticCode
+  ];
+  if (dockerReason !== undefined) {
+    return hasExactKeys(details, ["type", "reason", "apiVersion"]) &&
+      details.type === "docker-daemon" &&
+      details.reason === dockerReason &&
+      (details.apiVersion === null || typeof details.apiVersion === "string");
+  }
+  if (value.code === "PROCESS_PLATFORM_UNSUPPORTED") {
+    return hasExactKeys(details, ["type", "platform"]) &&
+      details.type === "process-platform" && typeof details.platform === "string";
+  }
+  if (value.code === "PROCESS_ROOT_INVALID" || value.code === "PROCESS_ROOT_INACCESSIBLE") {
+    return hasExactKeys(details, ["type", "prerequisite"]) &&
+      details.type === "process-root" &&
+      ["absolute", "non-symlink", "directory", "read-write-execute"].includes(
+        details.prerequisite as string,
+      );
+  }
+  const prerequisite = PROCESS_AVAILABILITY_PREREQUISITES[
+    value.code as AvailabilityDiagnosticCode
+  ];
+  return hasExactKeys(details, ["type", "prerequisite"]) &&
+    details.type === "process-runtime" &&
+    details.prerequisite === prerequisite;
+}
+
+function isBackendAvailability(
+  value: unknown,
+  backend: BackendReference,
+): value is BackendAvailability {
+  if (!isPlainObject(value) ||
+      !hasExactKeys(value, ["schemaVersion", "backend", "status", "checkedAt", "diagnostics"]) ||
+      value.schemaVersion !== 1 ||
+      !isBackendReference(value.backend) ||
+      !sameBackend(value.backend, backend) ||
+      (value.status !== "available" && value.status !== "unavailable") ||
+      !Number.isSafeInteger(value.checkedAt) || (value.checkedAt as number) < 0 ||
+      !Array.isArray(value.diagnostics) || value.diagnostics.length === 0 ||
+      !value.diagnostics.every(isAvailabilityDiagnostic)) return false;
+  const diagnostics = value.diagnostics as AvailabilityDiagnostic[];
+  if (new Set(diagnostics.map(({ code }) => code)).size !== diagnostics.length) return false;
+  const hasError = diagnostics.some(({ severity }) => severity === "error");
+  return value.status === "unavailable" ? hasError : !hasError;
 }
 
 function isErrorDetails(value: unknown): value is SandboxErrorDetails {
@@ -389,6 +491,80 @@ function requirementFailure(
       details: { type: "requirement-negotiation", issues },
     },
   };
+}
+
+type ArtifactRequirementPreflight =
+  | { readonly ok: true; readonly requirements: readonly SandboxRequirement[] }
+  | { readonly ok: false; readonly failure: ClientFailure };
+
+function artifactRequirementPreflight(
+  request: CreateSandboxRequest,
+  backend: BackendReference,
+): ArtifactRequirementPreflight {
+  const validation = validateBootArtifact(request.spec.bootArtifact);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      failure: invalidRequest(
+        request,
+        backend,
+        `spec.${validation.field}`,
+        validation.reason,
+      ),
+    };
+  }
+  const metadataValidation = validateSandboxFrontendMetadata(
+    request.spec.frontendMetadata,
+    validation.artifact,
+  );
+  if (!metadataValidation.ok) {
+    return {
+      ok: false,
+      failure: invalidRequest(
+        request,
+        backend,
+        `spec.${metadataValidation.field}`,
+        metadataValidation.reason,
+      ),
+    };
+  }
+  const indexes: number[] = [];
+  request.requirements.forEach((requirement, index) => {
+    if (requirement.type === "artifacts") indexes.push(index);
+  });
+  if (indexes.length === 0) {
+    return {
+      ok: true,
+      requirements: [
+        ...request.requirements,
+        {
+          type: "artifacts",
+          kinds: [validation.artifact.kind satisfies ArtifactKind],
+          acceptableSupport: ["native", "emulated", "partial"],
+        },
+      ],
+    };
+  }
+  if (indexes.length === 1) {
+    const index = indexes[0]!;
+    const requirement = request.requirements[index]!;
+    if (
+      requirement.type === "artifacts" &&
+      !requirement.kinds.includes(validation.artifact.kind)
+    ) {
+      return {
+        ok: false,
+        failure: requirementFailure(request, backend, [{
+          index,
+          kind: "conflict",
+          requirement,
+          reason: `The artifact requirement omits the sandbox boot artifact kind \"${validation.artifact.kind}\".`,
+          backendDiagnostic: null,
+        }]),
+      };
+    }
+  }
+  return { ok: true, requirements: request.requirements };
 }
 
 type ProcessFailure = Extract<RawCommandEvent, { type: "backend-failure" }> | {
@@ -795,6 +971,85 @@ export class EmbeddedSandboxClient implements SandboxClient {
       new LocalSandboxStateStore(options.stateRoot === undefined ? {} : { root: options.stateRoot });
   }
 
+  async probeAvailability(
+    request: ProbeAvailabilityRequest,
+  ): Promise<ClientResult<ProbeAvailabilityResult>> {
+    const remaining = request.deadline === null
+      ? null
+      : request.deadline.expiresAt - Date.now();
+    if (remaining !== null && remaining <= 0) {
+      return processFailure(
+        request,
+        this.backendReference,
+        "LOCALBOX_DEADLINE_EXCEEDED",
+        "The operation timed out.",
+        "deadline-exceeded",
+        "probeAvailability",
+      );
+    }
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const invocation = this.backend.probeAvailability(request) as Promise<unknown>;
+      const timeout = Promise.withResolvers<never>();
+      if (remaining !== null) {
+        timer = setTimeout(() => {
+          timeout.reject(new DOMException("The operation timed out", "AbortError"));
+        }, remaining);
+        timer.unref();
+      }
+      const result = remaining === null
+        ? await invocation
+        : await Promise.race([invocation, timeout.promise]);
+      if (isContractFailure(result, request.requestId)) {
+        return result.error.backend !== null &&
+            sameBackend(result.error.backend, this.backendReference)
+          ? result
+          : backendFailure(
+            request.requestId,
+            this.backendReference,
+            "probeAvailability",
+          );
+      }
+      if (
+        isJsonCompatible(result) &&
+        isPlainObject(result) &&
+        hasExactKeys(result, ["ok", "value"]) &&
+        result.ok === true &&
+        isPlainObject(result.value) &&
+        hasExactKeys(result.value, ["availability"]) &&
+        isBackendAvailability(result.value.availability, this.backendReference)
+      ) {
+        return result as ClientResult<ProbeAvailabilityResult>;
+      }
+      return backendFailure(
+        request.requestId,
+        this.backendReference,
+        "probeAvailability",
+      );
+    } catch {
+      if (
+        request.deadline !== null &&
+        request.deadline.expiresAt <= Date.now()
+      ) {
+        return processFailure(
+          request,
+          this.backendReference,
+          "LOCALBOX_DEADLINE_EXCEEDED",
+          "The operation timed out.",
+          "deadline-exceeded",
+          "probeAvailability",
+        );
+      }
+      return backendFailure(
+        request.requestId,
+        this.backendReference,
+        "probeAvailability",
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
     const selected = this.backendReference;
     if (
@@ -805,11 +1060,16 @@ export class EmbeddedSandboxClient implements SandboxClient {
       return Promise.resolve(backendMismatch(request, selected));
     }
 
-    const issues = negotiateSandboxRequirements(this.#capabilities, request.requirements);
+    const artifact = artifactRequirementPreflight(request, selected);
+    if (!artifact.ok) return Promise.resolve(artifact.failure);
+    const issues = negotiateSandboxRequirements(this.#capabilities, artifact.requirements);
     if (issues.length > 0) {
       return Promise.resolve(requirementFailure(request, selected, issues));
     }
-    return this.#idempotent("createSandbox", request, () => this.#createSandbox(request));
+    const merged = artifact.requirements === request.requirements
+      ? request
+      : { ...request, requirements: artifact.requirements };
+    return this.#idempotent("createSandbox", merged, () => this.#createSandbox(merged));
   }
 
   async #createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {

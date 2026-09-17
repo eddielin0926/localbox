@@ -14,6 +14,7 @@ import type {
 } from "../../src/runtime/index.js";
 import {
   TEST_CAPABILITIES,
+  TEST_OCI_ARTIFACT,
   testCapabilitiesWithOperationSupport,
 } from "../fixtures/runtime-capabilities.js";
 
@@ -44,6 +45,24 @@ function createBackend(
   return {
     reference,
     capabilities,
+    probeAvailability: () => Promise.resolve({
+      ok: true,
+      value: {
+        availability: {
+          schemaVersion: 1,
+          backend: reference,
+          status: "available",
+          checkedAt: 1_700_000_000_000,
+          diagnostics: [{
+            code: "PROCESS_PREREQUISITES_AVAILABLE",
+            severity: "info",
+            message: "Test backend prerequisites are available.",
+            action: "No action is required.",
+            details: { type: "process-runtime", prerequisite: "node-executable" },
+          }],
+        },
+      },
+    }),
     createSandbox: (request) => unavailable(request, "createSandbox"),
     getSandbox: (request) => unavailable(request, "getSandbox"),
     listSandboxes: (request) => unavailable(request, "listSandboxes"),
@@ -72,7 +91,12 @@ function createRequest(
     requirements,
     spec: {
       name,
-      bootSource: { type: "runtime", runtime: "node24" },
+      bootArtifact: TEST_OCI_ARTIFACT,
+      frontendMetadata: {
+        type: "vercel",
+        image: TEST_OCI_ARTIFACT.locator.reference,
+        runtime: "node24",
+      },
       source: null,
       persistent: false,
       timeoutMs: 300_000,
@@ -96,10 +120,8 @@ function sandboxRecord(
     name: request.spec.name,
     status: "running",
     persistent: request.spec.persistent,
-    bootSource: request.spec.bootSource.type === "image"
-      ? request.spec.bootSource
-      : { type: "image", image: `resolved:${request.spec.bootSource.runtime}` },
-    runtime: request.spec.bootSource.type === "runtime" ? request.spec.bootSource.runtime : null,
+    bootArtifact: request.spec.bootArtifact,
+    frontendMetadata: request.spec.frontendMetadata,
     backend,
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
@@ -342,6 +364,172 @@ describe("EmbeddedSandboxClient", () => {
     });
     expect(rawCommandCalls).toBe(0);
     expect(createCalls).toBe(0);
+  });
+
+  test("derives the boot artifact requirement and rejects conflicts before state or backend allocation", async () => {
+    const reference = { backendId: "artifact-only-host", backendType: "test" } as const;
+    let createCalls = 0;
+    const capabilities: SandboxCapabilities = {
+      ...TEST_CAPABILITIES,
+      artifacts: {
+        support: "partial",
+        constraints: { kinds: ["host"] },
+        diagnostic: "This backend accepts only current-host artifacts.",
+      },
+    };
+    const client = new EmbeddedSandboxClient(createBackend(reference, capabilities, {
+      async createSandbox(request) {
+        createCalls += 1;
+        return { ok: true, value: { sandbox: sandboxRecord(request, reference) } };
+      },
+    }));
+
+    const omitted = await client.createSandbox(
+      createRequest("derived-artifact", "derived-artifact", "derived-artifact"),
+    );
+    expect(omitted).toMatchObject({
+      ok: false,
+      error: {
+        category: "unsupported-requirement",
+        details: {
+          type: "requirement-negotiation",
+          issues: [{
+            requirement: { type: "artifacts", kinds: ["oci-image"] },
+          }],
+        },
+      },
+    });
+
+    const conflicting = await client.createSandbox(
+      createRequest("conflicting-artifact", "conflicting-artifact", "conflicting-artifact", null, [{
+        type: "artifacts",
+        kinds: ["host"],
+        acceptableSupport: ["partial"],
+      }]),
+    );
+    expect(conflicting).toMatchObject({
+      ok: false,
+      error: {
+        category: "invalid-request",
+        details: {
+          type: "requirement-negotiation",
+          issues: [{ index: 0, kind: "conflict" }],
+        },
+      },
+    });
+
+    const unknown = createRequest("unknown-artifact", "unknown-artifact", "unknown-artifact");
+    (unknown.spec as unknown as Record<string, unknown>).bootArtifact = {
+      kind: "future-artifact",
+      locator: {},
+      trust: "trusted",
+      mutability: "mutable",
+    };
+    expect(await client.createSandbox(unknown)).toMatchObject({
+      ok: false,
+      error: {
+        category: "invalid-request",
+        details: { type: "invalid-request", field: "spec.bootArtifact.kind" },
+      },
+    });
+    expect(createCalls).toBe(0);
+  });
+
+  test("validates availability identity, diagnostics, deadlines, and thrown failures", async () => {
+    const reference = { backendId: "probe", backendType: "test" } as const;
+    const valid = new EmbeddedSandboxClient(createBackend(reference));
+    expect(await valid.probeAvailability({
+      requestId: "probe-valid",
+      deadline: null,
+    })).toMatchObject({
+      ok: true,
+      value: {
+        availability: {
+          backend: reference,
+          status: "available",
+          diagnostics: [{ code: "PROCESS_PREREQUISITES_AVAILABLE" }],
+        },
+      },
+    });
+
+    const wrongIdentity = new EmbeddedSandboxClient(createBackend(reference, TEST_CAPABILITIES, {
+      probeAvailability: () => Promise.resolve({
+        ok: true,
+        value: {
+          availability: {
+            schemaVersion: 1,
+            backend: { backendId: "other", backendType: "test" },
+            status: "available",
+            checkedAt: 1,
+            diagnostics: [{
+              code: "PROCESS_PREREQUISITES_AVAILABLE",
+              severity: "info",
+              message: "Available.",
+              action: "No action.",
+              details: { type: "process-runtime", prerequisite: "node-executable" },
+            }],
+          },
+        },
+      }),
+    }));
+    expect(await wrongIdentity.probeAvailability({
+      requestId: "probe-wrong-identity",
+      deadline: null,
+    })).toMatchObject({ ok: false, error: { code: "LOCALBOX_BACKEND_FAILURE" } });
+
+    const malformed = new EmbeddedSandboxClient(createBackend(reference, TEST_CAPABILITIES, {
+      probeAvailability: () => Promise.resolve({
+        ok: true,
+        value: {
+          availability: {
+            schemaVersion: 1,
+            backend: reference,
+            status: "available",
+            checkedAt: 1,
+            diagnostics: [{
+              code: "FUTURE_DIAGNOSTIC",
+              severity: "info",
+              message: "Unknown.",
+              action: "No action.",
+              details: { type: "process-runtime", prerequisite: "node-executable" },
+            }],
+          },
+        },
+      } as never),
+    }));
+    expect(await malformed.probeAvailability({
+      requestId: "probe-malformed",
+      deadline: null,
+    })).toMatchObject({ ok: false, error: { code: "LOCALBOX_BACKEND_FAILURE" } });
+
+    let deadlineCalls = 0;
+    const deadline = new EmbeddedSandboxClient(createBackend(reference, TEST_CAPABILITIES, {
+      probeAvailability: () => {
+        deadlineCalls += 1;
+        return Promise.withResolvers<never>().promise;
+      },
+    }));
+    expect(await deadline.probeAvailability({
+      requestId: "probe-expired",
+      deadline: { expiresAt: 0 },
+    })).toMatchObject({
+      ok: false,
+      error: { category: "deadline-exceeded", code: "LOCALBOX_DEADLINE_EXCEEDED" },
+    });
+    expect(deadlineCalls).toBe(0);
+
+    const thrown = new EmbeddedSandboxClient(createBackend(reference, TEST_CAPABILITIES, {
+      probeAvailability: () => Promise.reject(new Error("credential=secret")),
+    }));
+    const failure = await thrown.probeAvailability({
+      requestId: "probe-thrown",
+      deadline: null,
+    });
+    expect(failure).toMatchObject({
+      ok: false,
+      error: { category: "backend-failure", code: "LOCALBOX_BACKEND_FAILURE" },
+    });
+    expect(JSON.stringify(failure)).not.toContain("secret");
   });
 
 });

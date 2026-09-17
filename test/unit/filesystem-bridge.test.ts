@@ -72,6 +72,8 @@ class MemoryFilesystemBackend implements SandboxBackend {
     });
   }
 
+  probeAvailability = (request: Parameters<SandboxBackend["probeAvailability"]>[0]) =>
+    unavailable(request, "probeAvailability");
   createSandbox = (request: Parameters<SandboxBackend["createSandbox"]>[0]) => unavailable(request, "createSandbox");
   getSandbox = (request: Parameters<SandboxBackend["getSandbox"]>[0]) => unavailable(request, "getSandbox");
   listSandboxes = (request: Parameters<SandboxBackend["listSandboxes"]>[0]) => unavailable(request, "listSandboxes");

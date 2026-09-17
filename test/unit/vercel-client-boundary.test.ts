@@ -6,12 +6,14 @@ import type {
   CreateSandboxRequest,
   JsonObject,
   ProcessRecord,
+  ProbeAvailabilityResult,
   RequestMetadata,
   SandboxClient,
   SandboxRecord,
 } from "../../src/runtime/index.js";
 import { setSandboxClientFactory } from "../../src/vercel/client.js";
 import {
+  MANAGED_IMAGES,
   LocalboxError,
   PortNotExposedError,
   Sandbox,
@@ -59,6 +61,26 @@ class BoundaryClient implements SandboxClient {
   readonly signals: string[] = [];
   #processSequence = 0;
 
+  async probeAvailability(
+    _request: Parameters<SandboxClient["probeAvailability"]>[0],
+  ) {
+    return success<ProbeAvailabilityResult>({
+      availability: {
+        schemaVersion: 1,
+        backend: BACKEND,
+        status: "available",
+        checkedAt: 1_800_000_000_000,
+        diagnostics: [{
+          code: "PROCESS_PREREQUISITES_AVAILABLE",
+          severity: "info",
+          message: "The boundary test backend is available.",
+          action: "No action is required.",
+          details: { type: "process-runtime", prerequisite: "node-executable" },
+        }],
+      },
+    });
+  }
+
   async createSandbox(request: Parameters<SandboxClient["createSandbox"]>[0]) {
     this.operations.push("createSandbox");
     this.createRequests.push(request);
@@ -71,10 +93,8 @@ class BoundaryClient implements SandboxClient {
       name: request.spec.name,
       status: "running",
       persistent: request.spec.persistent,
-      bootSource: request.spec.bootSource.type === "runtime"
-        ? { type: "image", image: `resolved:${request.spec.bootSource.runtime}` }
-        : request.spec.bootSource,
-      runtime: request.spec.bootSource.type === "runtime" ? request.spec.bootSource.runtime : null,
+      bootArtifact: request.spec.bootArtifact,
+      frontendMetadata: request.spec.frontendMetadata,
       backend: BACKEND,
       createdAt: now,
       updatedAt: now,
@@ -306,7 +326,7 @@ describe("Vercel compatibility through SandboxClient", () => {
       },
     });
     expect(created).toBe(1);
-    expect(sandbox.image).toBe("resolved:node24");
+    expect(sandbox.image).toBe(MANAGED_IMAGES.node24);
     await sandbox.stop();
 
     const resumedSandbox = await Sandbox.getOrCreate({
@@ -355,7 +375,7 @@ describe("Vercel compatibility through SandboxClient", () => {
       { type: "operation", operation: "filesystem.write", acceptableSupport: ["native", "emulated", "partial"] },
       { type: "operation", operation: "endpoint.expose", acceptableSupport: ["native", "emulated", "partial"] },
       { type: "operation", operation: "source.tarball", acceptableSupport: ["native", "emulated", "partial"] },
-      { type: "artifacts", kinds: ["oci-image", "tarball"], acceptableSupport: ["native", "emulated", "partial"] },
+      { type: "artifacts", kinds: ["oci-image"], acceptableSupport: ["native", "emulated", "partial"] },
       {
         type: "networking",
         mode: "allow-all",
