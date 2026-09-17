@@ -981,6 +981,7 @@ export class Sandbox {
       cmd: [options.cmd, ...(options.args ?? [])],
       cwd,
       env: [...environment].map(([key, value]) => `${key}=${value}`),
+      ...(options.user === undefined ? {} : { user: options.user }),
       ...(options.stdout === undefined ? {} : { stdout: options.stdout }),
       ...(options.stderr === undefined ? {} : { stderr: options.stderr }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),

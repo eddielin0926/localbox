@@ -1,4 +1,6 @@
 import Dockerode from "dockerode";
+import { MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE } from "../../runtime/internal-filesystem-bridge.js";
+import { MANAGED_IMAGE_REGISTRY } from "./managed-images.js";
 import {
   DockerUnavailableError,
   ImagePullError,
@@ -59,6 +61,22 @@ import type {
   SandboxListItem,
   SandboxSource,
 } from "./types.js";
+const PRIVILEGED_CHOWN = String.raw`
+import * as fs from "node:fs/promises";
+const prefix = "LOCALBOX_ERROR:";
+try {
+  const { path, uid, gid } = JSON.parse(process.argv[1]);
+  await fs.chown(path, uid, gid);
+} catch (error) {
+  process.stderr.write(prefix + JSON.stringify({
+    message: error instanceof Error ? error.message : String(error),
+    code: error && typeof error === "object" && "code" in error ? error.code : undefined,
+    path: error && typeof error === "object" && "path" in error ? error.path : undefined,
+    syscall: error && typeof error === "object" && "syscall" in error ? error.syscall : undefined,
+  }));
+  process.exitCode = 1;
+}
+`;
 
 const REFERENCE = Object.freeze({
   backendId: "local-docker",
@@ -540,11 +558,30 @@ export class DockerBackend implements SandboxBackend {
         throw new InvalidSandboxOptionsError("Command output limit must be a positive integer.");
       }
       const sandbox = await DockerSandbox.get(this.#docker, { name: request.sandboxId, ...(signal === undefined ? {} : { signal }) });
+      const privilegedChown = request.processId.startsWith(
+        MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE.processIdPrefix,
+      );
+      const chownPayload = request.command.arguments[4];
+      if (privilegedChown && (
+        !sandbox.image.startsWith(`${MANAGED_IMAGE_REGISTRY}:`)
+        || request.command.command !== MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE.nodePath
+        || request.command.arguments[3] !== "chown"
+        || chownPayload === undefined
+      )) {
+        throw new UnsupportedSandboxCapabilityError(
+          "privileged filesystem operations for this command",
+        );
+      }
       const command = await sandbox.runCommand({
-        cmd: request.command.command,
-        args: [...request.command.arguments],
+        cmd: privilegedChown
+          ? MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE.nodePath
+          : request.command.command,
+        args: privilegedChown
+          ? ["--input-type=module", "-e", PRIVILEGED_CHOWN, chownPayload!]
+          : [...request.command.arguments],
         cwd: request.command.cwd,
         env: { ...request.command.environment },
+        ...(privilegedChown ? { user: "0" } : {}),
         detached: true,
         ...(signal === undefined ? {} : { signal }),
       });

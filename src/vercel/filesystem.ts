@@ -482,7 +482,9 @@ export class FileSystem {
   ): Promise<Buffer> {
     await this.#state.ensureRunning(signal);
     throwIfAborted(signal);
-    const processId = randomUUID();
+    const processId = privilegeBridge === undefined
+      ? randomUUID()
+      : `${privilegeBridge.processIdPrefix}${randomUUID()}`;
     const nodeArguments = [
       "--input-type=module",
       "-e",
@@ -498,10 +500,8 @@ export class FileSystem {
       sandboxId: this.#state.sandboxId,
       processId,
       command: {
-        command: privilegeBridge?.sudoPath ?? "node",
-        arguments: privilegeBridge === undefined
-          ? nodeArguments
-          : ["-n", privilegeBridge.nodePath, ...nodeArguments],
+        command: privilegeBridge?.nodePath ?? "node",
+        arguments: nodeArguments,
         cwd: WORKSPACE,
         environment: {},
       },

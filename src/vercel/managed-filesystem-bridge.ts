@@ -1,14 +1,8 @@
+import { MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE } from "../runtime/internal-filesystem-bridge.js";
 import { MANAGED_IMAGE_REGISTRY } from "../runtime/index.js";
 
-export interface ManagedFilesystemPrivilegeBridge {
-  readonly sudoPath: string;
-  readonly nodePath: string;
-}
-
-const MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE = Object.freeze({
-  sudoPath: "/usr/bin/sudo",
-  nodePath: "/usr/local/bin/node",
-}) satisfies ManagedFilesystemPrivilegeBridge;
+export type ManagedFilesystemPrivilegeBridge =
+  typeof MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE;
 
 export function managedFilesystemPrivilegeBridge(
   image: string,

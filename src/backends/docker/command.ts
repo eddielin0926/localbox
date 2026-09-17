@@ -26,6 +26,7 @@ export interface CommandRunOptions {
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  user?: string;
   detached?: boolean;
   stdout?: Writable;
   stderr?: Writable;
@@ -274,6 +275,7 @@ export interface StartCommandOptions {
   cmd: string[];
   cwd: string;
   env: string[];
+  user?: string;
   stdout?: Writable;
   stderr?: Writable;
   signal?: AbortSignal;
@@ -371,6 +373,7 @@ export async function startCommand(
       Cmd: ["node", "--input-type=module", "-e", COMMAND_WRAPPER, pidPath, ...options.cmd],
       WorkingDir: options.cwd,
       Env: options.env,
+      ...(options.user === undefined ? {} : { User: options.user }),
       ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
     });
     throwIfAborted(options.signal);
