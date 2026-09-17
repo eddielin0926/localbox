@@ -18,7 +18,7 @@ const dockerHarness: BackendConformanceHarness = {
     git: {
       type: "git",
       url: "https://github.com/octocat/Hello-World.git",
-      revision: "7fd1a60b01f91b314f59951d85f522ee68a4a842",
+      revision: null,
       depth: 1,
       credentials: null,
     },

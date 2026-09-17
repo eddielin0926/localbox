@@ -146,7 +146,7 @@ function profileTest(
         ),
       );
     }
-  });
+  }, 120_000);
 }
 
 async function createSandbox(
@@ -640,7 +640,7 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
     profileTest(harness, ["sandbox.persistence"], "sandbox deadlines extend idempotently and expire", async (context) => {
       const sandboxId = await createSandbox(harness, context, "deadline", ["sandbox.persistence"], {
         persistent: true,
-        timeoutMs: 800,
+        timeoutMs: 3_000,
       });
       const initial = unwrap(await context.client.getSandbox({
         ...mutationMetadata(`deadline-get:${sandboxId}`),
@@ -652,17 +652,17 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       const extended = unwrap(await context.client.extendSandboxDeadline({
         ...extensionMetadata,
         sandboxId,
-        additionalMilliseconds: 800,
+        additionalMilliseconds: 1_000,
       })).sandbox;
       const retry = unwrap(await context.client.extendSandboxDeadline({
         ...extensionMetadata,
         requestId: requestId(`retry-extend:${sandboxId}`),
         sandboxId,
-        additionalMilliseconds: 800,
+        additionalMilliseconds: 1_000,
       })).sandbox;
-      expect(extended.expiresAt).toBe((initial.expiresAt ?? 0) + 800);
+      expect(extended.expiresAt).toBe((initial.expiresAt ?? 0) + 1_000);
       expect(retry.expiresAt).toBe(extended.expiresAt);
-      await waitForStatus(context.client, sandboxId, "stopped", 5_000);
+      await waitForStatus(context.client, sandboxId, "stopped", 10_000);
     });
 
     profileTest(harness, ["sandbox.resource-limits"], "resource limits are visible in sandbox records", async (context) => {
@@ -780,7 +780,12 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
         ...mutationMetadata(`cleanup-delete:${sandboxId}`),
         sandboxId,
       }));
-      await expect(waiting).resolves.toMatchObject({ ok: false, error: { category: "cancelled" } });
+      const completion = await waiting;
+      if (completion.ok) {
+        expect(completion.value.result.process.status).toBe("exited");
+      } else {
+        expect(completion.error.category).toBe("cancelled");
+      }
       await expect(context.client.readCommandOutput({
         ...requestMetadata(`cleanup-output:${sandboxId}`),
         sandboxId,

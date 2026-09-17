@@ -91,7 +91,8 @@ describe("Docker mechanism integration", () => {
     expect(info.Config.Image).toBe(MANAGED_IMAGES.node24);
     expect(info.HostConfig.NanoCpus).toBe(1_000_000_000);
     expect(info.HostConfig.Memory).toBe(2_048 * 1_048_576);
-    expect(Object.keys(info.NetworkSettings.Networks)).toHaveLength(0);
+    expect(info.HostConfig.NetworkMode).toBe("none");
+    expect(Object.keys(info.NetworkSettings.Networks)).toEqual(["none"]);
   }, 120_000);
 
   test("publishes declared ports through the Docker host binding", async () => {
