@@ -99,6 +99,8 @@ Backends need only raw command execution plus advertised bounded-input support. 
 
 Ownership changes use the explicit internal `managed-filesystem-owner` raw-command privilege. A backend must reject that privilege before process start unless the sandbox uses a trusted managed image; it then runs only the neutral filesystem program with the managed image's fixed Node executable as root. Public arbitrary `user: root` is never a substitute. Unsupported semantic, transfer, or privilege capabilities fail before filesystem mutation or data transfer begins.
 
+Host-style backends may implement the internal `filesystemWorkspace(sandboxId)` mapping. The bridge then translates the public `/vercel/sandbox` root to that private absolute workspace for the duration of its fixed filesystem command only. It validates every lexical path and real ancestor, rejects traversal and symlink resolution outside the workspace, keeps staged transfers inside the workspace, and maps results and file errors back to virtual paths. Container backends omit the mapping and retain their existing container-global `/vercel/sandbox` behavior.
+
 ## Docker backend ownership and security boundary
 
 `DockerBackend` is the only Docker boundary. It owns Dockerode construction and values, managed-image resolution, labels, container creation and inspection, persistence and resource settings, network and published-port inspection, watchdog deadlines, source materialization, raw exec creation, bounded stdin attachment, stream demultiplexing, exit inspection, raw signal delivery, cleanup, and Docker failure translation. It does not contain filesystem operation scripts or semantic filesystem APIs. Docker exec IDs, streams, containers, and inspect values remain private. The backend does not allocate neutral process IDs or retain replay output, cursors, followers, waiters, or frontend callbacks.
@@ -109,13 +111,52 @@ Networking is partial: bridge `allow-all` and network-none `deny-all` are availa
 
 The default Docker composition lives in `src/default-client.ts` and accepts an explicit absolute state-root override while otherwise following XDG resolution. The Vercel compatibility frontend receives a generic `SandboxClient` factory and retains only the client plus neutral records and IDs. Its create requests require the operational command/filesystem surface, selected source and endpoint operations, accepted artifact kinds, requested persistence, selected network policy, and requested resource values. It accepts native, emulated, or partial implementations because those classifications preserve the released local v0.3 behavior; unsupported snapshot, mount, retention, and custom cloud/network options continue to fail before client allocation.
 
+## Trusted host process backend
+
+`ProcessBackend` is an opt-in POSIX backend for explicitly trusted, single-user workloads. It is constructed with an absolute private backend root and an optional stable instance identity, then injected explicitly:
+
+```ts
+import { EmbeddedSandboxClient, ProcessBackend } from "localbox/runtime";
+
+const backend = new ProcessBackend({
+  root: "/absolute/private/localbox-process-state",
+  instanceId: "developer-host",
+});
+const client = new EmbeddedSandboxClient(backend, {
+  stateRoot: "/absolute/private/localbox-runtime-state",
+});
+```
+
+When `root` is omitted it resolves to `<localbox-XDG-state-root>/backends/process`. The normalized root and instance ID are hashed into both a stable backend reference and a digest-only instance directory, so independent identities can share one parent without mutable registries or path injection. `createDefaultSandboxClient()` and the Vercel interception composition remain Docker-backed; there is no environment switch or global process-backend selection.
+
+The process backend accepts only `{ type: "runtime", runtime: "host" }` with no source, no ports, `allow-all` networking, no resource request, and no region. It never treats an OCI image name as permission to execute its contents on the host. Complete capability negotiation runs before a sandbox workspace is created.
+
+| Capability | Classification | Process behavior |
+| --- | --- | --- |
+| Command start | `native` | Direct argv execution with `shell: false`, an explicit mapped cwd, and explicit environment composition |
+| Detached command | `emulated` | In-process command/output identity plus a per-command supervisor; not restart-recoverable |
+| Filesystem mkdir/read/write | `emulated` | Neutral bridge mapped into the private workspace with traversal and symlink escape checks |
+| Raw stdin | `native` | One binary-safe payload bounded to 1 MiB |
+| Isolation | `partial`, level `process`, tenancy `trusted` | Private directory and process bookkeeping only; **no security isolation boundary** |
+| Artifacts | `partial` | The `host` runtime selector only; Git, tarball, OCI image, directory, disk image, and snapshot inputs are rejected |
+| Persistence | `native` | Workspace and lifecycle descriptor survive stop/resume and backend reconstruction |
+| Recovery | `partial`, scope `sandbox` | Metadata/workspace only; commands, output, waiters, and idempotency state are not recovered |
+| Networking | `partial`, mode `allow-all` | The host network stack is shared directly; no namespace, deny policy, custom policy, endpoint record, or port remapping |
+| Managed owner, resources, terminals, snapshots | `unsupported` | Rejected before process or workspace allocation |
+
+Each instance stores schema-v1 descriptors below `<root>/instances/<identity-digest>/sandboxes/<sandbox-name-digest>/sandbox.json` and workspace content in the adjacent `workspace/` directory. Directories are mode `0700`, descriptors are mode `0600`, descriptor replacement is write-sync-rename-directory-sync, creation is staged then atomically renamed, and sandbox deletion addresses only digest-derived directories. Per-sandbox lock directories serialize lifecycle updates across reconstructed backend objects; unreadable or malformed descriptors fail closed. Persistent stop retains the workspace, resume starts a new deadline, and get/list reconcile expired descriptors. Ephemeral stop or expiry removes the private workspace. Environment values are deliberately not persisted, consistent with metadata-only recovery.
+
+Every command is launched through a small Node supervisor using direct argv and `shell: false`. On POSIX the target becomes a distinct process-group leader. Signals address that group; stop, delete, deadline expiry, filesystem abort, and raw-command disposal send `TERM`, wait a bounded interval, then send `KILL`. Completion is emitted once after UTF-8 stream decoding and descendant cleanup. The supervisor records the Localbox parent PID and polls both parent identity and liveness, so abrupt parent exit triggers the same group cleanup before the supervisor exits. Process IDs and supervisor handles never enter descriptors or public records.
+
+The backend currently requires POSIX process-group semantics and rejects construction on Windows. Linux is the CI-covered platform; macOS uses the same Node/POSIX primitives but remains a platform caveat until covered by CI. Host commands can read host files, use host credentials, inspect or signal other same-user processes, bind arbitrary ports, and consume unbounded resources. Therefore `ProcessBackend` **must not** run hostile code, untrusted dependencies, or multi-tenant workloads; use a container, namespace sandbox, or VM backend for those cases.
+
 ## Backend conformance profiles
 
 Every operational capability key must map to at least one observable behavior profile in `test/conformance/backend-profile.ts`, and every domain has an explicit coverage mapping. Registration supplies a `BackendConformanceHarness`: the complete capability record, a client constructor, an optional peer client sharing the same state root, a complete valid `SandboxSpec`, unique sandbox-name generation, source fixtures when source operations are supported, and deterministic cleanup. The shared profiles exercise lifecycle and mutation idempotency, cross-runtime sandbox-name ownership, command ordering/wait/signal/error behavior, bounded binary and text filesystem pages, endpoint records, request and sandbox deadlines, persistence, sources, networking, resource records, and deletion cleanup.
 
-A profile declares typed requirements and runs when every required capability is native, emulated, or partial in one of its explicitly accepted classes. It skips only an explicitly `unsupported` entry; a malformed advertisement, unknown key, missing key, unprofiled key, unacceptable supported class, or constraint mismatch fails instead of silently skipping. Each case owns uniquely named resources and invokes harness cleanup from a `finally` path, so profiles are parallel- and full-suite-safe.
+A profile declares typed requirements and runs only when negotiation confirms the backend's advertised support class and constraints satisfy them. Precisely unsupported operations or domain constraints are capability-only skips; malformed advertisements, unknown or missing keys, and unprofiled capability keys fail the coverage profile. Each case owns uniquely named resources and invokes harness cleanup from a `finally` path, so profiles are parallel- and full-suite-safe.
 
-To register a future backend, publish all schema v1 keys even when unsupported, choose support classifications before constraints, state the security boundary in each diagnostic, and use the narrowest honest bounds. Add or update an observable profile whenever adding an operational key, and reject an unknown requirement discriminant rather than guessing its meaning. Construct the backend behind its normal `SandboxClient` boundary, provide real source fixtures for supported source operations, and call `registerBackendConformanceProfiles`. Backend-specific mechanism tests may remain beside the registration, but reusable contract expectations belong in the profiles. Docker registers through `EmbeddedSandboxClient` in `test/integration/docker-conformance.test.ts`; the Docker integration CI job discovers that file.
+To register a future backend, publish all schema v1 keys even when unsupported, choose support classifications before constraints, state the security boundary in each diagnostic, and use the narrowest honest bounds. Add or update an observable profile whenever adding an operational key, and reject an unknown requirement discriminant rather than guessing its meaning. Construct the backend behind its normal `SandboxClient` boundary, provide real source fixtures for supported source operations, and call `registerBackendConformanceProfiles`. Backend-specific mechanism tests may remain beside the registration, but reusable contract expectations belong in the profiles. Docker registers through `EmbeddedSandboxClient` in `test/integration/docker-conformance.test.ts`; Process registers without Docker in `test/process/process-conformance.test.ts`.
 
 ## Error boundary
 
@@ -123,4 +164,4 @@ Valid contract failures returned by a backend retain their category, code, messa
 
 ## Intentional non-goals
 
-This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, or additional provider APIs. Process, bwrap, and Podman backends and a remote service or control plane remain deferred to later milestones. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
+This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, or additional provider APIs. Bubblewrap, Podman, the general boot-artifact/availability model, and a remote service or control plane remain deferred to later milestones. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).

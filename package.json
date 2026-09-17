@@ -66,8 +66,10 @@
     "test:resolution": "vitest run test/package/node-resolution-hook.test.ts",
     "test:cli": "vitest run test/package/cli-process-wrapper.test.ts",
     "test:integration": "vitest run test/integration",
+    "test:process": "vitest run test/process",
     "smoke": "node examples/basic.mjs",
     "smoke:interception": "node scripts/smoke-interception.mjs",
+    "smoke:process": "node scripts/smoke-process-backend.mjs",
     "compatibility:vercel": "node scripts/report-compatibility.mjs"
   },
   "dependencies": {

@@ -160,19 +160,14 @@ function profileTest(
   title: string,
   run: (context: ProfileContext) => Promise<void>,
 ): void {
-  const unsupported = requirements.filter((requirement) => {
-    const capability = requirement.type === "operation"
-      ? harness.capabilities.operations[requirement.operation]
-      : harness.capabilities[requirement.type];
-    return capability.support === "unsupported";
-  });
+  const capabilityIssues = negotiateSandboxRequirements(harness.capabilities, requirements);
   const labels = requirements.map((requirement) =>
     requirement.type === "operation" ? requirement.operation : requirement.type
   );
-  const suffix = unsupported.length === 0
+  const suffix = capabilityIssues.length === 0
     ? labels.length === 0 ? "" : ` [capabilities: ${labels.join(", ")}]`
-    : ` [unsupported capability: ${labels.filter((_, index) => unsupported.includes(requirements[index]!)).join(", ")}]`;
-  test.skipIf(unsupported.length > 0)(`${title}${suffix}`, async () => {
+    : ` [unsupported capability: ${labels.join(", ")}]`;
+  test.skipIf(capabilityIssues.length > 0)(`${title}${suffix}`, async () => {
     const context: ProfileContext = {
       client: await harness.createClient(),
       sandboxIds: new Set<string>(),
