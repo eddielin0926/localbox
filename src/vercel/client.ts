@@ -1,13 +1,12 @@
 import { randomUUID } from "node:crypto";
-import {
-  EmbeddedSandboxClient,
-  DockerBackend,
-  type ClientResult,
-  type JsonObject,
-  type MutationMetadata,
-  type RequestMetadata,
-  type SandboxClient,
-  type SandboxError,
+import { createDefaultSandboxClient } from "../default-client.js";
+import type {
+  ClientResult,
+  JsonObject,
+  MutationMetadata,
+  RequestMetadata,
+  SandboxClient,
+  SandboxError,
 } from "../runtime/index.js";
 import {
   DockerUnavailableError,
@@ -23,8 +22,15 @@ import {
   UnsupportedSandboxCapabilityError,
 } from "./errors.js";
 
+let sandboxClientFactory: () => SandboxClient = createDefaultSandboxClient;
+
 export function createSandboxClient(): SandboxClient {
-  return new EmbeddedSandboxClient(new DockerBackend());
+  return sandboxClientFactory();
+}
+
+/** @internal Test seam for exercising the compatibility frontend through a neutral client. */
+export function setSandboxClientFactory(factory: (() => SandboxClient) | null): void {
+  sandboxClientFactory = factory ?? createDefaultSandboxClient;
 }
 
 export function requestMetadata(): RequestMetadata {

@@ -19,6 +19,7 @@ import type {
   JsonObject,
   ListSandboxesRequest,
   ListSandboxesResult,
+  MutationMetadata,
   MakeDirectoryRequest,
   MakeDirectoryResult,
   ProcessRecord,
@@ -662,12 +663,40 @@ async function awaitProcessChange(
     signal?.removeEventListener("abort", abort);
   }
 }
+
+interface IdempotentMutation {
+  readonly fingerprint: string;
+  readonly result: Promise<ClientResult<JsonObject>>;
+}
+
+function mutationFingerprint(request: MutationMetadata): string {
+  const fingerprint = JSON.stringify({ ...request, requestId: null, deadline: null });
+  if (fingerprint === undefined) {
+    throw new TypeError("Mutation metadata must be JSON-compatible.");
+  }
+  return fingerprint;
+}
+
+function replayMutationResult<Result extends JsonObject>(
+  result: ClientResult<JsonObject>,
+  requestId: string,
+): ClientResult<Result> {
+  if (result.ok) return result as ClientResult<Result>;
+  return {
+    ok: false,
+    error: {
+      ...result.error,
+      requestId,
+    },
+  };
+}
 /** In-process client bound permanently to one explicitly supplied backend. */
 export class EmbeddedSandboxClient implements SandboxClient {
   readonly backend: SandboxBackend;
   readonly backendReference: BackendReference;
   readonly #capabilities: ReadonlySet<SandboxCapability>;
   readonly #processes = new Map<string, RuntimeProcess>();
+  readonly #mutations = new Map<string, IdempotentMutation>();
   readonly #filesystem: FilesystemBridge;
 
   constructor(backend: SandboxBackend) {
@@ -683,23 +712,26 @@ export class EmbeddedSandboxClient implements SandboxClient {
     this.#filesystem = new FilesystemBridge(backend);
   }
 
-  async createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
-    const selected = this.backendReference;
-    if (
-      request.backend !== null &&
-      (request.backend.backendId !== selected.backendId ||
-        request.backend.backendType !== selected.backendType)
-    ) {
-      return backendMismatch(request, selected);
-    }
+  createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
+    return this.#idempotent("createSandbox", request, async () => {
+      const selected = this.backendReference;
+      if (
+        request.backend !== null &&
+        (request.backend.backendId !== selected.backendId ||
+          request.backend.backendType !== selected.backendType)
+      ) {
+        return backendMismatch(request, selected);
+      }
 
-    const unsupported = unsupportedRequirements(request, selected, this.#capabilities);
-    if (unsupported !== null) return unsupported;
-    return this.#invoke("createSandbox", request);
+      const unsupported = unsupportedRequirements(request, selected, this.#capabilities);
+      if (unsupported !== null) return unsupported;
+      return this.#invoke("createSandbox", request);
+    });
   }
 
   getSandbox(request: GetSandboxRequest): Promise<ClientResult<GetSandboxResult>> {
-    return this.#invoke("getSandbox", request);
+    if (!request.resume) return this.#invoke("getSandbox", request);
+    return this.#idempotent("resumeSandbox", request, () => this.#invoke("getSandbox", request));
   }
 
   listSandboxes(request: ListSandboxesRequest): Promise<ClientResult<ListSandboxesResult>> {
@@ -707,33 +739,43 @@ export class EmbeddedSandboxClient implements SandboxClient {
   }
 
   stopSandbox(request: StopSandboxRequest): Promise<ClientResult<StopSandboxResult>> {
-    return this.#invoke("stopSandbox", request);
+    return this.#idempotent("stopSandbox", request, () => this.#invoke("stopSandbox", request));
   }
 
-  async deleteSandbox(
+  deleteSandbox(
     request: DeleteSandboxRequest,
   ): Promise<ClientResult<DeleteSandboxResult>> {
-    const result = await this.#invoke("deleteSandbox", request);
-    if (!result.ok) return result;
+    return this.#idempotent("deleteSandbox", request, async () => {
+      const result = await this.#invoke("deleteSandbox", request);
+      if (!result.ok) return result;
 
-    const disposals: Promise<void>[] = [];
-    for (const [key, state] of this.#processes) {
-      if (state.sandboxId !== request.sandboxId) continue;
-      this.#processes.delete(key);
-      settleProcess(state, { type: "deleted" });
-      disposals.push(state.raw.dispose().catch(() => undefined));
-    }
-    await Promise.all(disposals);
-    return result;
+      const disposals: Promise<void>[] = [];
+      for (const [key, state] of this.#processes) {
+        if (state.sandboxId !== request.sandboxId) continue;
+        this.#processes.delete(key);
+        settleProcess(state, { type: "deleted" });
+        disposals.push(state.raw.dispose().catch(() => undefined));
+      }
+      await Promise.all(disposals);
+      return result;
+    });
   }
 
   extendSandboxDeadline(
     request: ExtendSandboxDeadlineRequest,
   ): Promise<ClientResult<ExtendSandboxDeadlineResult>> {
-    return this.#invoke("extendSandboxDeadline", request);
+    return this.#idempotent(
+      "extendSandboxDeadline",
+      request,
+      () => this.#invoke("extendSandboxDeadline", request),
+    );
   }
 
-  async startCommand(
+  startCommand(request: StartCommandRequest): Promise<ClientResult<StartCommandResult>> {
+    return this.#idempotent("startCommand", request, () => this.#startCommand(request));
+  }
+
+  async #startCommand(
     request: StartCommandRequest,
   ): Promise<ClientResult<StartCommandResult>> {
     if (!Number.isSafeInteger(request.outputLimitBytes) || request.outputLimitBytes < 1) {
@@ -873,7 +915,11 @@ export class EmbeddedSandboxClient implements SandboxClient {
     });
   }
 
-  async signalProcess(
+  signalProcess(request: SignalProcessRequest): Promise<ClientResult<SignalProcessResult>> {
+    return this.#idempotent("signalProcess", request, () => this.#signalProcess(request));
+  }
+
+  async #signalProcess(
     request: SignalProcessRequest,
   ): Promise<ClientResult<SignalProcessResult>> {
     const state = this.#processes.get(processKey(request.sandboxId, request.processId));
@@ -982,21 +1028,66 @@ export class EmbeddedSandboxClient implements SandboxClient {
   }
 
   writeFile(request: WriteFileRequest): Promise<ClientResult<WriteFileResult>> {
-    return this.#invokeFilesystem((signal) => this.#filesystem.writeFile(request, signal), request);
+    return this.#idempotent(
+      "writeFile",
+      request,
+      () => this.#invokeFilesystem((signal) => this.#filesystem.writeFile(request, signal), request),
+    );
   }
 
   makeDirectory(request: MakeDirectoryRequest): Promise<ClientResult<MakeDirectoryResult>> {
-    return this.#invokeFilesystem((signal) => this.#filesystem.makeDirectory(request, signal), request);
+    return this.#idempotent(
+      "makeDirectory",
+      request,
+      () => this.#invokeFilesystem((signal) => this.#filesystem.makeDirectory(request, signal), request),
+    );
   }
 
   runFilesystemOperation(
     request: RunFilesystemOperationRequest,
   ): Promise<ClientResult<RunFilesystemOperationResult>> {
-    return this.#invokeFilesystem((signal) => this.#filesystem.run(request, signal), request);
+    return this.#idempotent(
+      `filesystem:${request.operation}`,
+      request,
+      () => this.#invokeFilesystem((signal) => this.#filesystem.run(request, signal), request),
+    );
   }
 
   getEndpoint(request: GetEndpointRequest): Promise<ClientResult<GetEndpointResult>> {
     return this.#invoke("getEndpoint", request);
+  }
+
+  #idempotent<Result extends JsonObject>(
+    operation: string,
+    request: MutationMetadata,
+    work: () => Promise<ClientResult<Result>>,
+  ): Promise<ClientResult<Result>> {
+    const key = `${operation}:${request.idempotencyKey}`;
+    const fingerprint = mutationFingerprint(request);
+    const existing = this.#mutations.get(key);
+    if (existing !== undefined) {
+      if (existing.fingerprint !== fingerprint) {
+        return Promise.resolve(invalidRequest(
+          request,
+          this.backendReference,
+          "idempotencyKey",
+          "An idempotency key cannot be reused for a different mutation.",
+        ));
+      }
+      return existing.result.then((result) =>
+        replayMutationResult<Result>(result, request.requestId)
+      );
+    }
+
+    const result = work() as Promise<ClientResult<JsonObject>>;
+    const entry = { fingerprint, result };
+    this.#mutations.set(key, entry);
+    void result.then((settled) => {
+      if (!settled.ok && this.#mutations.get(key) === entry) this.#mutations.delete(key);
+    }, () => {
+      if (this.#mutations.get(key) === entry) this.#mutations.delete(key);
+    });
+    return result as Promise<ClientResult<Result>>;
   }
 
   async #invokeFilesystem<Result extends JsonObject>(
