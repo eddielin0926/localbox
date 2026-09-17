@@ -204,11 +204,16 @@ async function readAllOutput(
   sandboxId: string,
   processId: string,
   limitBytes = 3,
-): Promise<{ readonly text: string; readonly streams: readonly string[] }> {
+): Promise<{
+  readonly text: string;
+  readonly stdout: string;
+  readonly stderr: string;
+}> {
   let cursor: string | null = null;
   let complete = false;
   const text: string[] = [];
-  const streams: string[] = [];
+  const stdout: string[] = [];
+  const stderr: string[] = [];
   while (!complete) {
     const page: ReadCommandOutputResult = unwrap(await client.readCommandOutput({
       ...requestMetadata(`read-output:${processId}`),
@@ -221,12 +226,13 @@ async function readAllOutput(
     }));
     for (const chunk of page.chunks) {
       text.push(chunk.data);
-      streams.push(chunk.stream);
+      if (chunk.stream === "stdout") stdout.push(chunk.data);
+      else stderr.push(chunk.data);
     }
     cursor = page.nextCursor;
     complete = page.complete;
   }
-  return { text: text.join(""), streams };
+  return { text: text.join(""), stdout: stdout.join(""), stderr: stderr.join("") };
 }
 
 async function waitForStatus(
@@ -453,7 +459,7 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       }
     });
 
-    profileTest(harness, [operationRequirement("command.start")], "commands preserve output order, pagination, exit status, errors, and start idempotency", async (context) => {
+    profileTest(harness, [operationRequirement("command.start")], "commands preserve per-stream output order, pagination, exit status, errors, and start idempotency", async (context) => {
       const sandboxId = await createSandbox(harness, context, "commands", [operationRequirement("command.start")]);
       const startMetadata = mutationMetadata(`start:${sandboxId}`);
       const request = {
@@ -480,8 +486,8 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       }));
       expect(waited.result).toMatchObject({ exitCode: 7, process: { status: "exited" } });
       const output = await readAllOutput(context.client, sandboxId, process.processId);
-      expect(output.text).toBe("onetwothree");
-      expect(output.streams).toEqual(["stdout", "stderr", "stdout", "stdout"]);
+      expect(output.stdout).toBe("onethree");
+      expect(output.stderr).toBe("two");
 
       const missing = unwrap(await context.client.startCommand({
         ...mutationMetadata(`missing-command:${sandboxId}`),

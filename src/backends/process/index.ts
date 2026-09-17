@@ -18,7 +18,6 @@ import { StringDecoder } from "node:string_decoder";
 import { setTimeout as delay } from "node:timers/promises";
 import { FILESYSTEM_TRANSFER_CHUNK_BYTES } from "../../runtime/filesystem-bridge.js";
 import { negotiateSandboxRequirements } from "../../runtime/capabilities.js";
-import { resolveLocalStateRoot } from "../../runtime/local-state.js";
 import type {
   BackendReference,
   ClientFailure,
@@ -180,9 +179,9 @@ interface ProcessDescriptor {
 
 interface ProcessBackendOptions {
   /** Absolute directory containing private process-backend instances. */
-  readonly root?: string;
+  readonly root: string;
   /** Stable identity used to allow multiple independent instances below one root. */
-  readonly instanceId?: string;
+  readonly instanceId: string;
 }
 
 interface SupervisorMessage {
@@ -524,17 +523,16 @@ export class ProcessBackend implements SandboxBackend {
   readonly #environments = new Map<string, Readonly<Record<string, string>>>();
   readonly #deadlineTimers = new Map<string, NodeJS.Timeout>();
 
-  constructor(options: ProcessBackendOptions = {}) {
+  constructor(options: ProcessBackendOptions) {
     if (process.platform === "win32") {
       throw new TypeError("ProcessBackend requires POSIX process-group semantics and is not supported on Windows.");
     }
-    const configuredRoot = options.root ?? join(resolveLocalStateRoot(), "backends", "process");
-    if (!isAbsolute(configuredRoot)) throw new TypeError("The process backend root must be an absolute path.");
-    const instanceId = options.instanceId ?? "default";
+    if (!isAbsolute(options.root)) throw new TypeError("The process backend root must be an absolute path.");
+    const instanceId = options.instanceId;
     if (instanceId.length === 0 || instanceId.includes("\0")) {
       throw new TypeError("The process backend instance ID must be a non-empty string without NUL bytes.");
     }
-    this.root = resolve(configuredRoot);
+    this.root = resolve(options.root);
     this.instanceId = instanceId;
     const identity = hash(`${this.root}\0${instanceId}`);
     this.reference = Object.freeze({ backendId: `local-process-${identity}`, backendType: "process" });

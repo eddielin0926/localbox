@@ -99,7 +99,7 @@ const transferPath = async (id) => {
   if (!/^[a-f0-9-]{36}$/i.test(id)) throw invalidPath(id);
   if (!mapped) return "/tmp/localbox-filesystem-" + id;
   const directory = path.join(normalizedHostRoot, ".localbox-transfers");
-  await fsp.mkdir(directory, { mode: 0o700 });
+  await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
   return path.join(directory, id);
 };
 const readInput = async () => {

@@ -113,7 +113,7 @@ The default Docker composition lives in `src/default-client.ts` and accepts an e
 
 ## Trusted host process backend
 
-`ProcessBackend` is an opt-in POSIX backend for explicitly trusted, single-user workloads. It is constructed with an absolute private backend root and an optional stable instance identity, then injected explicitly:
+`ProcessBackend` is an opt-in POSIX backend for explicitly trusted, single-user workloads. It requires an absolute private backend root and stable instance identity, then is injected explicitly:
 
 ```ts
 import { EmbeddedSandboxClient, ProcessBackend } from "localbox/runtime";
@@ -127,7 +127,7 @@ const client = new EmbeddedSandboxClient(backend, {
 });
 ```
 
-When `root` is omitted it resolves to `<localbox-XDG-state-root>/backends/process`. The normalized root and instance ID are hashed into both a stable backend reference and a digest-only instance directory, so independent identities can share one parent without mutable registries or path injection. `createDefaultSandboxClient()` and the Vercel interception composition remain Docker-backed; there is no environment switch or global process-backend selection.
+The caller injects both roots explicitly; applications that follow XDG should resolve them before construction. The normalized backend root and instance ID are hashed into both a stable backend reference and a digest-only instance directory, so independent identities can share one parent without mutable registries or path injection. `createDefaultSandboxClient()` and the Vercel interception composition remain Docker-backed; there is no environment switch or global process-backend selection.
 
 The process backend accepts only `{ type: "runtime", runtime: "host" }` with no source, no ports, `allow-all` networking, no resource request, and no region. It never treats an OCI image name as permission to execute its contents on the host. Complete capability negotiation runs before a sandbox workspace is created.
 
