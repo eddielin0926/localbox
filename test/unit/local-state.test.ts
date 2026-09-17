@@ -12,11 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import {
-  ModuleKind,
-  ScriptTarget,
-  transpileModule,
-} from "typescript";
+import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   EmbeddedSandboxClient,
@@ -293,8 +289,8 @@ describe("LocalSandboxStateStore", () => {
 
   test("allows exactly one real child process to claim a name", async () => {
     const source = await readFile(new URL("../../src/runtime/local-state.ts", import.meta.url), "utf8");
-    const output = transpileModule(source, {
-      compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2022 },
+    const output = ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
     }).outputText;
     const modulePath = join(root, "local-state.mjs");
     const stateRoot = join(root, "child-state");
