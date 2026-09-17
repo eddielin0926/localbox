@@ -486,8 +486,8 @@ export class BwrapBackend implements SandboxBackend {
       "--unshare-uts",
       "--unshare-cgroup-try",
       policy === "deny-all" ? "--unshare-net" : "--share-net",
-      "--uid", String(process.getuid?.() ?? 0),
-      "--gid", String(process.getgid?.() ?? 0),
+      "--uid", "0",
+      "--gid", "0",
       "--hostname", "localbox",
     ];
     const { binds, symlinks } = await this.#runtimeMounts();
