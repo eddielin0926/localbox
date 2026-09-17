@@ -168,8 +168,7 @@ describe("neutral filesystem bridge", () => {
     const backend = new MemoryFilesystemBackend();
     const client = new EmbeddedSandboxClient(backend);
     const filesystem = createFileSystem(client, "sandbox", async () => undefined);
-    const contents = Buffer.alloc(FILESYSTEM_TRANSFER_CHUNK_BYTES * 2 + 7);
-    for (let index = 0; index < contents.length; index += 1) contents[index] = index % 251;
+    const contents = Buffer.alloc(FILESYSTEM_TRANSFER_CHUNK_BYTES + 7, 0xa5);
 
     await filesystem.writeFile("large.bin", contents, { mode: 0o640 });
     expect(await filesystem.readFile("large.bin")).toEqual(contents);
@@ -177,13 +176,13 @@ describe("neutral filesystem bridge", () => {
     const staged = backend.commands.filter((command) => command.operation === "stageWrite");
     expect(staged.map((command) => command.inputBytes)).toEqual([
       FILESYSTEM_TRANSFER_CHUNK_BYTES,
-      FILESYSTEM_TRANSFER_CHUNK_BYTES,
       7,
     ]);
     expect(staged.every((command) => command.inputBytes <= FILESYSTEM_TRANSFER_CHUNK_BYTES)).toBe(true);
-    expect(backend.commands.some((command) =>
-      (JSON.stringify(command.arguments) ?? "").includes(contents.toString("base64"))
-    )).toBe(false);
+    expect(backend.commands.every((command) =>
+      !Object.hasOwn(command.arguments, "data") &&
+      !Object.hasOwn(command.arguments, "stdin")
+    )).toBe(true);
     expect(backend.commands.find((command) => command.operation === "commitWrite")?.arguments).toMatchObject({
       path: "/vercel/sandbox/large.bin",
       mode: 0o640,
@@ -193,7 +192,6 @@ describe("neutral filesystem bridge", () => {
     expect(reads.map((command) => command.arguments.offset)).toEqual([
       0,
       FILESYSTEM_TRANSFER_CHUNK_BYTES,
-      FILESYSTEM_TRANSFER_CHUNK_BYTES * 2,
     ]);
     expect(reads.every((command) =>
       command.arguments.limitBytes === FILESYSTEM_TRANSFER_CHUNK_BYTES

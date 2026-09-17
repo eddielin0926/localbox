@@ -548,6 +548,7 @@ export class FilesystemBridge {
       aborting ??= raw.signal("SIGKILL").catch(() => undefined);
     };
     signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
     let stdout = "";
     let stderr = "";
     let completion: Extract<RawCommandEvent, { type: "complete" | "backend-failure" }> | undefined;
