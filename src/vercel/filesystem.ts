@@ -191,7 +191,14 @@ export function resolveSandboxPath(path: string): string {
 function fileError(stderr: Buffer): NodeFileError {
   const text = stderr.toString("utf8");
   const marker = text.indexOf(ERROR_PREFIX);
-  if (marker === -1) return new Error("The filesystem operation failed inside the sandbox.");
+  if (marker === -1) {
+    const detail = text.trim();
+    return new Error(
+      detail.length === 0
+        ? "The filesystem operation failed inside the sandbox."
+        : `The filesystem operation failed inside the sandbox: ${detail}`,
+    );
+  }
   const payload = JSON.parse(text.slice(marker + ERROR_PREFIX.length)) as {
     message: string;
     code?: string;
