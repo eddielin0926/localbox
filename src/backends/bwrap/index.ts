@@ -426,7 +426,7 @@ export class BwrapBackend implements SandboxBackend {
         }
       }
       const binary = await this.#resolveBinary();
-      const arguments_ = await this.#sandboxArguments(policy, workspace.root, cwd, request.command, environment);
+      const arguments_ = await this.#sandboxArguments(binary, policy, workspace.root, cwd, request.command, environment);
       let raw: LocalRawCommand;
       raw = new LocalRawCommand({
         command: binary,
@@ -467,13 +467,14 @@ export class BwrapBackend implements SandboxBackend {
   }
 
   async #sandboxArguments(
+    binary: string,
     policy: SandboxNetworkPolicy,
     workspace: string | null,
     cwd: string,
     command: StartRawCommandRequest["command"],
     environment: Readonly<Record<string, string>>,
   ): Promise<string[]> {
-    const args = await this.#namespaceArguments(policy);
+    const args = await this.#namespaceArguments(binary, policy);
     if (workspace !== null) {
       await this.#validateBindSource(workspace, "workspace", true);
       const privateTmp = join(dirname(workspace), "tmp");
@@ -508,7 +509,10 @@ export class BwrapBackend implements SandboxBackend {
     return args;
   }
 
-  async #namespaceArguments(policy: SandboxNetworkPolicy): Promise<string[]> {
+  async #namespaceArguments(binary: string, policy: SandboxNetworkPolicy): Promise<string[]> {
+    const setuid = ((await lstat(binary)).mode & fsConstants.S_ISUID) !== 0;
+    const sandboxUid = setuid ? process.getuid?.() ?? 0 : 0;
+    const sandboxGid = setuid ? process.getgid?.() ?? 0 : 0;
     const args = [
       "--die-with-parent",
       "--new-session",
@@ -518,8 +522,8 @@ export class BwrapBackend implements SandboxBackend {
       "--unshare-uts",
       "--unshare-cgroup-try",
       policy === "deny-all" ? "--unshare-net" : "--share-net",
-      "--uid", "0",
-      "--gid", "0",
+      "--uid", String(sandboxUid),
+      "--gid", String(sandboxGid),
       "--hostname", "localbox",
     ];
     const { binds, symlinks } = await this.#runtimeMounts();
@@ -618,7 +622,7 @@ export class BwrapBackend implements SandboxBackend {
   }
 
   async #probeNamespaces(binary: string, policy: SandboxNetworkPolicy): Promise<ProbeResult> {
-    const args = await this.#sandboxArguments(policy, null, "/", {
+    const args = await this.#sandboxArguments(binary, policy, null, "/", {
       command: "/usr/bin/true",
       arguments: [],
       cwd: "/",
