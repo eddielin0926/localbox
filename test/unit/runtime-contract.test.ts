@@ -8,7 +8,7 @@ import type {
   ReadCommandOutputResult,
   ReadFileResult,
   SignalProcessRequest,
-  UnsupportedRequirementDetails,
+  RequirementNegotiationDetails,
   WriteFileRequest,
 } from "../../src/runtime/index.js";
 
@@ -51,11 +51,31 @@ const createRequest = {
   sandboxId: "sandbox-1",
   backend,
   requirements: [
-    { capability: "command.start", parameters: null },
-    { capability: "filesystem.read", parameters: null },
-    { capability: "filesystem.write", parameters: null },
-    { capability: "filesystem.mkdir", parameters: null },
-    { capability: "endpoint.expose", parameters: { ports: [3000] } },
+    {
+      type: "operation",
+      operation: "command.start",
+      acceptableSupport: ["native", "emulated", "partial"],
+    },
+    {
+      type: "operation",
+      operation: "filesystem.read",
+      acceptableSupport: ["native", "emulated", "partial"],
+    },
+    {
+      type: "operation",
+      operation: "filesystem.write",
+      acceptableSupport: ["native", "emulated", "partial"],
+    },
+    {
+      type: "operation",
+      operation: "filesystem.mkdir",
+      acceptableSupport: ["native", "emulated", "partial"],
+    },
+    {
+      type: "operation",
+      operation: "endpoint.expose",
+      acceptableSupport: ["native", "emulated", "partial"],
+    },
   ],
   spec: {
     name: "example",
@@ -154,17 +174,23 @@ const unsupportedFailure = {
     requestId: "req-create-2",
     backend,
     details: {
-      type: "unsupported-requirements",
-      requirements: [
+      type: "requirement-negotiation",
+      issues: [
         {
+          index: 0,
+          kind: "unsupported",
           requirement: {
-            capability: "sandbox.network.deny-all",
-            parameters: null,
+            type: "networking",
+            mode: "deny-all",
+            portExposure: null,
+            customPolicy: false,
+            acceptableSupport: ["native"],
           },
-          reason: "This backend cannot isolate outbound networking.",
+          reason: "The backend does not provide deny-all networking.",
+          backendDiagnostic: "This backend permits outbound networking only.",
         },
       ],
-    } satisfies UnsupportedRequirementDetails,
+    } satisfies RequirementNegotiationDetails,
   },
 } as const satisfies ClientFailure;
 

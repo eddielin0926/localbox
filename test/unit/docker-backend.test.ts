@@ -41,6 +41,85 @@ describe("DockerBackend boundary", () => {
     expect(JSON.parse(JSON.stringify(result))).toEqual(result);
   });
 
+  test("advertises an honest transport-safe capability matrix", () => {
+    const capabilities = new DockerBackend().capabilities;
+
+    expect(capabilities.schemaVersion).toBe(1);
+    expect(Object.fromEntries(
+      Object.entries(capabilities.operations).map(([name, entry]) => [name, entry.support]),
+    )).toEqual({
+      "command.start": "native",
+      "command.detached": "emulated",
+      "endpoint.expose": "native",
+      "filesystem.mkdir": "emulated",
+      "filesystem.read": "emulated",
+      "filesystem.write": "emulated",
+      "source.git": "emulated",
+      "source.tarball": "emulated",
+      "raw-command.input": "native",
+      "raw-command.managed-filesystem-owner": "partial",
+    });
+    expect(capabilities).toMatchObject({
+      isolation: {
+        support: "partial",
+        constraints: {
+          level: "shared-kernel-container",
+          tenancies: ["trusted", "single-tenant"],
+        },
+      },
+      artifacts: {
+        support: "partial",
+        constraints: { kinds: ["runtime", "oci-image", "git", "tarball"] },
+      },
+      persistence: {
+        support: "native",
+        constraints: { scopes: ["sandbox-lifecycle", "backend-restart"] },
+      },
+      recovery: {
+        support: "partial",
+        constraints: { scopes: ["sandbox"] },
+      },
+      networking: {
+        support: "partial",
+        constraints: {
+          modes: ["allow-all", "deny-all"],
+          portExposure: ["loopback"],
+          customPolicies: false,
+        },
+      },
+      resources: {
+        support: "partial",
+        constraints: {
+          cpu: { minimumVcpus: 1, maximumVcpus: null, stepVcpus: 1 },
+          memoryBytesPerVcpu: 2_147_483_648,
+          enforcement: "hard",
+        },
+      },
+      terminals: {
+        support: "unsupported",
+        constraints: { modes: [] },
+      },
+      snapshots: {
+        support: "unsupported",
+        constraints: { operations: [] },
+      },
+    });
+    expect(JSON.parse(JSON.stringify(capabilities))).toEqual(capabilities);
+    for (const entry of [
+      ...Object.values(capabilities.operations),
+      capabilities.isolation,
+      capabilities.artifacts,
+      capabilities.persistence,
+      capabilities.recovery,
+      capabilities.networking,
+      capabilities.resources,
+      capabilities.terminals,
+      capabilities.snapshots,
+    ]) {
+      expect(entry.diagnostic.length).toBeGreaterThan(20);
+    }
+  });
+
   test("resolves managed image aliases without rewriting custom OCI images", () => {
     expect(resolveSandboxImage({})).toBe(MANAGED_IMAGES.universal);
     expect(resolveSandboxImage({ runtime: "node24" })).toBe(MANAGED_IMAGES.node24);

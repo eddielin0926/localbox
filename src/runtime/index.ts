@@ -62,34 +62,185 @@ export type BackendReference = JsonObject & {
   readonly backendType: string;
 };
 
-export type SandboxCapability =
+export type CapabilitySupport = "native" | "emulated" | "partial" | "unsupported";
+
+export type CapabilityDescriptor<Constraints extends JsonValue> = JsonObject & {
+  readonly support: CapabilitySupport;
+  readonly constraints: Constraints;
+  /** Actionable backend-specific behavior and limitations. */
+  readonly diagnostic: string;
+};
+
+export type SandboxOperationalCapability =
   | "command.start"
   | "command.detached"
   | "endpoint.expose"
   | "filesystem.mkdir"
   | "filesystem.read"
   | "filesystem.write"
-  | "sandbox.network.allow-all"
-  | "sandbox.network.deny-all"
-  | "sandbox.persistence"
-  | "sandbox.resource-limits"
-  | "sandbox.source.git"
-  | "sandbox.source.tarball";
+  | "source.git"
+  | "source.tarball"
+  | "raw-command.input"
+  | "raw-command.managed-filesystem-owner";
 
-/** Optional raw-execution features used by the neutral filesystem bridge. */
-export type RawCommandCapability =
-  | "input"
-  | "managed-filesystem-owner";
-
-/** A semantic requirement that must be checked before sandbox creation. */
-export type SandboxRequirement = JsonObject & {
-  readonly capability: SandboxCapability;
-  readonly parameters: JsonObject | null;
+export type EndpointCapabilityConstraints = JsonObject & {
+  readonly protocols: readonly ("http" | "https")[];
+  readonly visibilities: readonly EndpointVisibility[];
 };
 
-export type UnsupportedSandboxRequirement = JsonObject & {
-  readonly requirement: SandboxRequirement;
+export type SandboxOperationalCapabilities = JsonObject & {
+  readonly "command.start": CapabilityDescriptor<null>;
+  readonly "command.detached": CapabilityDescriptor<null>;
+  readonly "endpoint.expose": CapabilityDescriptor<EndpointCapabilityConstraints>;
+  readonly "filesystem.mkdir": CapabilityDescriptor<null>;
+  readonly "filesystem.read": CapabilityDescriptor<null>;
+  readonly "filesystem.write": CapabilityDescriptor<null>;
+  readonly "source.git": CapabilityDescriptor<null>;
+  readonly "source.tarball": CapabilityDescriptor<null>;
+  readonly "raw-command.input": CapabilityDescriptor<JsonObject & {
+    readonly maxBytes: number;
+  }>;
+  readonly "raw-command.managed-filesystem-owner": CapabilityDescriptor<JsonObject & {
+    readonly managedImagesOnly: boolean;
+  }>;
+};
+
+export type IsolationLevel =
+  | "process"
+  | "shared-kernel-container"
+  | "namespace-sandbox"
+  | "virtual-machine";
+export type IsolationTenancy = "trusted" | "single-tenant" | "multi-tenant";
+export type ArtifactKind =
+  | "runtime"
+  | "oci-image"
+  | "git"
+  | "tarball"
+  | "directory"
+  | "disk-image"
+  | "snapshot";
+export type PersistenceScope = "sandbox-lifecycle" | "backend-restart";
+export type RecoveryScope = "sandbox" | "process";
+export type NetworkMode = "allow-all" | "deny-all" | "custom";
+export type EndpointVisibility = "loopback" | "private" | "public";
+export type ResourceEnforcement = "hard" | "best-effort";
+export type TerminalMode = "exec" | "pty";
+export type SnapshotOperation = "create" | "restore" | "clone";
+
+export type SandboxCapabilities = JsonObject & {
+  readonly schemaVersion: 1;
+  readonly operations: SandboxOperationalCapabilities;
+  readonly isolation: CapabilityDescriptor<JsonObject & {
+    readonly level: IsolationLevel;
+    readonly tenancies: readonly IsolationTenancy[];
+  }>;
+  readonly artifacts: CapabilityDescriptor<JsonObject & {
+    readonly kinds: readonly ArtifactKind[];
+  }>;
+  readonly persistence: CapabilityDescriptor<JsonObject & {
+    readonly scopes: readonly PersistenceScope[];
+  }>;
+  readonly recovery: CapabilityDescriptor<JsonObject & {
+    readonly scopes: readonly RecoveryScope[];
+  }>;
+  readonly networking: CapabilityDescriptor<JsonObject & {
+    readonly modes: readonly NetworkMode[];
+    readonly portExposure: readonly EndpointVisibility[];
+    readonly customPolicies: boolean;
+  }>;
+  readonly resources: CapabilityDescriptor<JsonObject & {
+    readonly cpu: JsonObject & {
+      readonly minimumVcpus: number;
+      readonly maximumVcpus: number | null;
+      readonly stepVcpus: number;
+    };
+    readonly memory: JsonObject & {
+      readonly minimumBytes: number;
+      readonly maximumBytes: number | null;
+      readonly stepBytes: number;
+    };
+    readonly memoryBytesPerVcpu: number | null;
+    readonly enforcement: ResourceEnforcement;
+  }>;
+  readonly terminals: CapabilityDescriptor<JsonObject & {
+    readonly modes: readonly TerminalMode[];
+  }>;
+  readonly snapshots: CapabilityDescriptor<JsonObject & {
+    readonly operations: readonly SnapshotOperation[];
+  }>;
+};
+
+type RequirementSupport = JsonObject & {
+  readonly acceptableSupport: readonly Exclude<CapabilitySupport, "unsupported">[];
+};
+
+export type OperationalSandboxRequirement = RequirementSupport & {
+  readonly type: "operation";
+  readonly operation: SandboxOperationalCapability;
+};
+export type IsolationSandboxRequirement = RequirementSupport & {
+  readonly type: "isolation";
+  readonly minimumLevel: IsolationLevel;
+  readonly tenancy: IsolationTenancy;
+};
+export type ArtifactSandboxRequirement = RequirementSupport & {
+  readonly type: "artifacts";
+  readonly kinds: readonly ArtifactKind[];
+};
+export type PersistenceSandboxRequirement = RequirementSupport & {
+  readonly type: "persistence";
+  readonly scope: PersistenceScope;
+};
+export type RecoverySandboxRequirement = RequirementSupport & {
+  readonly type: "recovery";
+  readonly scope: RecoveryScope;
+};
+export type NetworkingSandboxRequirement = RequirementSupport & {
+  readonly type: "networking";
+  readonly mode: NetworkMode;
+  readonly portExposure: EndpointVisibility | null;
+  readonly customPolicy: boolean;
+};
+export type ResourceSandboxRequirement = RequirementSupport & {
+  readonly type: "resources";
+  readonly vcpus: number | null;
+  readonly memoryBytes: number | null;
+  readonly enforcement: ResourceEnforcement;
+};
+export type TerminalSandboxRequirement = RequirementSupport & {
+  readonly type: "terminals";
+  readonly mode: TerminalMode;
+};
+export type SnapshotSandboxRequirement = RequirementSupport & {
+  readonly type: "snapshots";
+  readonly operation: SnapshotOperation;
+};
+
+/** A transport-safe semantic guarantee that must be negotiated before creation. */
+export type SandboxRequirement =
+  | OperationalSandboxRequirement
+  | IsolationSandboxRequirement
+  | ArtifactSandboxRequirement
+  | PersistenceSandboxRequirement
+  | RecoverySandboxRequirement
+  | NetworkingSandboxRequirement
+  | ResourceSandboxRequirement
+  | TerminalSandboxRequirement
+  | SnapshotSandboxRequirement;
+
+export type SandboxRequirementIssue = JsonObject & {
+  readonly index: number | null;
+  readonly kind:
+    | "malformed"
+    | "unknown"
+    | "duplicate"
+    | "conflict"
+    | "unsupported"
+    | "constraint"
+    | "invalid-backend-capabilities";
+  readonly requirement: SandboxRequirement | null;
   readonly reason: string;
+  readonly backendDiagnostic: string | null;
 };
 
 export type RuntimeBootSource = JsonObject & {
@@ -464,9 +615,9 @@ export type InvalidRequestDetails = JsonObject & {
   readonly reason: string;
 };
 
-export type UnsupportedRequirementDetails = JsonObject & {
-  readonly type: "unsupported-requirements";
-  readonly requirements: readonly UnsupportedSandboxRequirement[];
+export type RequirementNegotiationDetails = JsonObject & {
+  readonly type: "requirement-negotiation";
+  readonly issues: readonly SandboxRequirementIssue[];
 };
 
 export type ResourceErrorDetails = JsonObject & {
@@ -498,7 +649,7 @@ export type NoErrorDetails = JsonObject & {
 
 export type SandboxErrorDetails =
   | InvalidRequestDetails
-  | UnsupportedRequirementDetails
+  | RequirementNegotiationDetails
   | ResourceErrorDetails
   | BackendErrorDetails
   | SourceErrorDetails
@@ -576,8 +727,7 @@ export type SandboxBackend = Pick<
   | "getEndpoint"
 > & {
   readonly reference: BackendReference;
-  readonly capabilities: readonly SandboxCapability[];
-  readonly rawCommandCapabilities: readonly RawCommandCapability[];
+  readonly capabilities: SandboxCapabilities;
   startRawCommand(
     request: StartRawCommandRequest,
     signal?: AbortSignal,
@@ -585,6 +735,10 @@ export type SandboxBackend = Pick<
 };
 
 export { EmbeddedSandboxClient } from "./embedded.js";
+export {
+  negotiateSandboxRequirements,
+  SANDBOX_OPERATIONAL_CAPABILITIES,
+} from "./capabilities.js";
 export {
   DockerBackend,
   MANAGED_IMAGES,
