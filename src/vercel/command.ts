@@ -3,6 +3,7 @@ import type { Writable } from "node:stream";
 import type {
   CommandOutputChunk,
   ProcessRecord,
+  ReadCommandOutputResult,
   SandboxClient,
 } from "../runtime/index.js";
 import {
@@ -101,7 +102,7 @@ async function pumpCommand(state: CommandState): Promise<void> {
   let cursor: string | null = null;
   try {
     for (;;) {
-      const page = unwrap(await state.client.readCommandOutput({
+      const page: ReadCommandOutputResult = unwrap(await state.client.readCommandOutput({
         ...requestMetadata(),
         sandboxId: state.sandboxId,
         processId: state.processId,

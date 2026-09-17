@@ -15,6 +15,7 @@ import type {
   BackendReference,
   ClientFailure,
   ClientResult,
+  CommandOutputChunk,
   CreateSandboxRequest,
   CreateSandboxResult,
   DeleteSandboxRequest,
@@ -622,7 +623,7 @@ export class DockerBackend implements SandboxBackend {
       }
       let { index, offset } = parseOutputCursor(request.cursor);
       let remaining = request.limitBytes;
-      const chunks: CommandChunk[] = [];
+      const chunks: CommandOutputChunk[] = [];
       while (index < state.chunks.length && remaining > 0) {
         const chunk = state.chunks[index];
         if (chunk === undefined) break;

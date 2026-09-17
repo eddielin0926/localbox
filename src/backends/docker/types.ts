@@ -101,7 +101,7 @@ export interface SandboxListItem {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly currentSessionId: string;
-  readonly status: SandboxStatus | "aborted" | "snapshotting";
+  readonly status: SandboxStatus;
   readonly vcpus?: number;
   readonly memory?: number;
   readonly image: string;
