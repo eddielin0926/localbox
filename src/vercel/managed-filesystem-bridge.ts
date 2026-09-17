@@ -13,7 +13,7 @@ const MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE = Object.freeze({
 export function managedFilesystemPrivilegeBridge(
   image: string,
 ): ManagedFilesystemPrivilegeBridge | null {
-  return image.startsWith(`${MANAGED_IMAGE_REGISTRY}/`)
+  return image.startsWith(`${MANAGED_IMAGE_REGISTRY}:`)
     ? MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE
     : null;
 }
