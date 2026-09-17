@@ -599,7 +599,10 @@ export class Sandbox {
   async #ensureRunning(signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
     this.#assertUsable();
-    if (this.#resumePromise !== undefined) return this.#resumePromise;
+    if (this.#resumePromise !== undefined) {
+      if (this.#record.status === "running") return;
+      return this.#resumePromise;
+    }
     const resume = (async () => {
       const observed = unwrap(await withAbort(this.#client.getSandbox({
         ...mutationMetadata(),

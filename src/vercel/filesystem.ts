@@ -472,7 +472,7 @@ export class FileSystem {
       sandboxId: this.#state.sandboxId,
       processId,
       command: {
-        command: operation === "chown" ? "sudo" : "node",
+        command: operation === "chown" ? "/usr/bin/sudo" : "node",
         arguments: operation === "chown" ? ["node", ...nodeArguments] : nodeArguments,
         cwd: WORKSPACE,
         environment: {},
