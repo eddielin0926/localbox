@@ -458,7 +458,7 @@ export class BwrapBackend implements SandboxBackend {
   ): Promise<string[]> {
     const args = await this.#namespaceArguments(policy);
     if (workspace !== null) {
-      await this.#validateBindSource(workspace, "workspace");
+      await this.#validateBindSource(workspace, "workspace", true);
       args.push("--dir", "/vercel", "--bind", workspace, VIRTUAL_WORKSPACE);
     }
     args.push("--chdir", cwd, "--clearenv");
@@ -481,7 +481,6 @@ export class BwrapBackend implements SandboxBackend {
       "--die-with-parent",
       "--new-session",
       "--unshare-user",
-      "--disable-userns",
       "--unshare-pid",
       "--unshare-ipc",
       "--unshare-uts",
@@ -564,7 +563,11 @@ export class BwrapBackend implements SandboxBackend {
     return binds;
   }
 
-  async #validateBindSource(source: string, purpose: string): Promise<void> {
+  async #validateBindSource(
+    source: string,
+    purpose: string,
+    allowBackendDescendant = false,
+  ): Promise<void> {
     if (!isAbsolute(source) || source === sep || source.includes("\0")) {
       throw new Error(`Invalid ${purpose} bind source.`);
     }
@@ -574,7 +577,12 @@ export class BwrapBackend implements SandboxBackend {
     }
     const canonical = await realpath(source);
     if (canonical !== source) throw new Error(`The ${purpose} bind source traverses a symbolic link.`);
-    if (overlaps(source, this.root)) throw new Error(`The ${purpose} bind source overlaps the private backend root.`);
+    if (!allowBackendDescendant && overlaps(source, this.root)) {
+      throw new Error(`The ${purpose} bind source overlaps the private backend root.`);
+    }
+    if (allowBackendDescendant && !inside(this.root, source)) {
+      throw new Error(`The ${purpose} bind source is not owned by the private backend root.`);
+    }
   }
 
   async #probeNamespaces(binary: string, policy: SandboxNetworkPolicy): Promise<ProbeResult> {
