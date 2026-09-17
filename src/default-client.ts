@@ -6,3 +6,10 @@ import type { SandboxClient } from "./runtime/index.js";
 export function createDefaultSandboxClient(): SandboxClient {
   return new EmbeddedSandboxClient(new DockerBackend());
 }
+
+export {
+  DockerBackend,
+  MANAGED_IMAGES,
+  MANAGED_IMAGE_REGISTRY,
+  MANAGED_IMAGE_UPSTREAM_COMMIT,
+} from "./backends/docker/index.js";
