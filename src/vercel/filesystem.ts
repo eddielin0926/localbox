@@ -473,7 +473,9 @@ export class FileSystem {
       processId,
       command: {
         command: operation === "chown" ? "/usr/bin/sudo" : "node",
-        arguments: operation === "chown" ? ["node", ...nodeArguments] : nodeArguments,
+        arguments: operation === "chown"
+          ? ["-n", "/usr/local/bin/node", ...nodeArguments]
+          : nodeArguments,
         cwd: WORKSPACE,
         environment: {},
       },
