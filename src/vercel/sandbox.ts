@@ -4,12 +4,13 @@ import { dirname, resolve as resolveLocalPath } from "node:path";
 import { posix } from "node:path";
 import { Readable } from "node:stream";
 import type {
+  ClientResult,
   SandboxClient,
   SandboxRecord,
   SandboxRequirement,
   SandboxSource as RuntimeSandboxSource,
+  StartCommandResult,
 } from "../runtime/index.js";
-import { Command, type CommandRunOptions, CommandFinished, createCommand } from "./command.js";
 import {
   createSandboxClient,
   mutationMetadata,
@@ -480,12 +481,10 @@ export class Sandbox {
       throw new TypeError("Command name must be non-empty and cannot contain NUL bytes.");
     }
     const cwd = resolveContainerPath(options.cwd ?? WORKSPACE);
-    const processId = randomUUID();
     await this.#ensureRunning(options.signal);
-    const started = unwrap(await withAbort(this.#client.startCommand({
+    const startOperation = this.#client.startCommand({
       ...mutationMetadata(),
       sandboxId: this.#record.sandboxId,
-      processId,
       command: {
         command: options.cmd,
         arguments: [...(options.args ?? [])],
@@ -493,7 +492,25 @@ export class Sandbox {
         environment: { ...options.env },
       },
       outputLimitBytes: 16 * 1024 * 1024,
-    }), options.signal));
+    });
+    let startResult: ClientResult<StartCommandResult>;
+    try {
+      startResult = await withAbort(startOperation, options.signal);
+    } catch (error) {
+      if (options.signal?.aborted) {
+        void startOperation.then(async (result) => {
+          if (!result.ok) return;
+          await this.#client.signalProcess({
+            ...mutationMetadata(),
+            sandboxId: this.#record.sandboxId,
+            processId: result.value.process.processId,
+            signal: "SIGTERM",
+          });
+        }).catch(() => undefined);
+      }
+      throw error;
+    }
+    const started = unwrap(startResult);
     const command = createCommand(
       this.#client,
       this.#record.sandboxId,

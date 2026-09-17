@@ -227,13 +227,16 @@ export type CommandSpec = JsonObject & {
   readonly arguments: readonly string[];
   readonly cwd: string;
   readonly environment: Readonly<Record<string, string>>;
+  /** Internal execution identity; omitted for the sandbox's default user. */
+  readonly user?: string;
 };
 
 /**
  * Output is retained by the runtime and retrieved through readCommandOutput;
- * callers never pass streams or callbacks across the client boundary.
+ * callers never pass streams or callbacks across the client boundary. Process
+ * identity is allocated by the runtime when the command starts.
  */
-export type StartCommandRequest = MutationMetadata & ProcessReference & {
+export type StartCommandRequest = MutationMetadata & SandboxReference & {
   readonly command: CommandSpec;
   readonly outputLimitBytes: number;
 };
@@ -271,11 +274,12 @@ export type SignalProcessResult = JsonObject & {
   readonly process: ProcessRecord;
 };
 
-
 export type ReadCommandOutputRequest = RequestMetadata & ProcessReference & {
   readonly stream: OutputStream;
   readonly cursor: OutputCursor | null;
   readonly limitBytes: number;
+  /** Wait until output or completion when the cursor is currently caught up. */
+  readonly follow: boolean;
 };
 
 export type CommandOutputChunk = JsonObject & {
@@ -290,6 +294,43 @@ export type ReadCommandOutputResult = JsonObject & {
   readonly complete: boolean;
   readonly truncated: boolean;
 };
+
+/**
+ * Plain-data events emitted by a backend raw command. The embedded runtime
+ * consumes these immediately; they are never exposed through SandboxClient.
+ */
+export type RawCommandEvent =
+  | (JsonObject & {
+    readonly type: "stdout" | "stderr";
+    readonly data: string;
+  })
+  | (JsonObject & {
+    readonly type: "complete";
+    readonly exitCode: number;
+    readonly finishedAt: TimestampMilliseconds;
+  })
+  | (JsonObject & {
+    readonly type: "backend-failure";
+    readonly code: string;
+    readonly message: string;
+    readonly retryable: boolean;
+  });
+
+/** In-process raw command primitive implemented by a concrete backend. */
+export interface RawCommand {
+  readonly startedAt: TimestampMilliseconds;
+  readonly events: AsyncIterable<RawCommandEvent>;
+  signal(signal: ProcessSignal, abortSignal?: AbortSignal): Promise<void>;
+  dispose(): Promise<void>;
+}
+
+export type StartRawCommandRequest = RequestMetadata & SandboxReference & {
+  readonly command: CommandSpec;
+};
+
+export type StartRawCommandResult =
+  | { readonly ok: true; readonly command: RawCommand }
+  | ClientFailure;
 
 /** Binary file values use base64; Buffer and Uint8Array never cross the boundary. */
 export type FileContent =
@@ -463,13 +504,30 @@ export interface SandboxClient {
 }
 
 /**
- * In-process execution port. Implementations own sandbox state and advertise
- * the semantics they can satisfy before creation.
+ * In-process execution port. SandboxClient command lifecycle operations are
+ * deliberately absent: a backend only starts a raw command and emits
+ * plain-data events. EmbeddedSandboxClient owns process identity and state.
  */
-export interface SandboxBackend extends SandboxClient {
+export type SandboxBackend = Pick<
+  SandboxClient,
+  | "createSandbox"
+  | "getSandbox"
+  | "listSandboxes"
+  | "stopSandbox"
+  | "deleteSandbox"
+  | "extendSandboxDeadline"
+  | "readFile"
+  | "writeFile"
+  | "makeDirectory"
+  | "getEndpoint"
+> & {
   readonly reference: BackendReference;
   readonly capabilities: readonly SandboxCapability[];
-}
+  startRawCommand(
+    request: StartRawCommandRequest,
+    signal?: AbortSignal,
+  ): Promise<StartRawCommandResult>;
+};
 
 export { EmbeddedSandboxClient } from "./embedded.js";
 export {

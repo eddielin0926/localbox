@@ -1,4 +1,3 @@
-import { setTimeout as delay } from "node:timers/promises";
 import type { Writable } from "node:stream";
 import type {
   CommandOutputChunk,
@@ -109,11 +108,11 @@ async function pumpCommand(state: CommandState): Promise<void> {
         stream: "both",
         cursor,
         limitBytes: 64 * 1024,
+        follow: true,
       }));
       for (const chunk of page.chunks) publish(state, chunk);
       cursor = page.nextCursor;
       if (page.complete) break;
-      await delay(page.chunks.length === 0 ? 10 : 0);
     }
     const waited = unwrap(await state.client.waitForCommand({
       ...requestMetadata(),
