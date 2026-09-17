@@ -1,15 +1,17 @@
-import { randomUUID } from "node:crypto";
-import { StringDecoder } from "node:string_decoder";
-import { Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import type Dockerode from "dockerode";
+import type { Writable } from "node:stream";
+import type {
+  CommandOutputChunk,
+  ProcessRecord,
+  SandboxClient,
+} from "../runtime/index.js";
 import {
   abortError,
-  docker,
-  rawExec,
+  mutationMetadata,
+  requestMetadata,
   throwIfAborted,
-  translateDockerError,
-} from "../core/docker.js";
+  unwrap,
+} from "./client.js";
 
 export type CommandOutput = "stdout" | "stderr" | "both";
 
@@ -47,60 +49,34 @@ export type Signal =
   | "SIGSTOP"
   | number;
 
-const PORTABLE_SIGNALS = new Set<Exclude<Signal, number>>([
-  "SIGHUP",
-  "SIGINT",
-  "SIGQUIT",
-  "SIGKILL",
-  "SIGTERM",
-  "SIGCONT",
-  "SIGSTOP",
-]);
-
-const COMMAND_WRAPPER = String.raw`
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import * as fs from "node:fs/promises";
-const pidPath = process.argv[1];
-const command = process.argv[2];
-const args = process.argv.slice(3);
-const child = spawn(command, args, { stdio: "inherit" });
-const spawned = once(child, "spawn");
-const exited = once(child, "exit");
-try {
-  await spawned;
-} catch (error) {
-  await exited.catch(() => undefined);
-  process.stderr.write((error instanceof Error ? error.message : String(error)) + "\n");
-  process.exit(127);
-}
-await fs.writeFile(pidPath, String(child.pid));
-const [code, signal] = await exited;
-await fs.rm(pidPath, { force: true });
-if (signal) {
-  process.kill(process.pid, signal);
-} else {
-  process.exit(code ?? 1);
-}
-`;
+const PORTABLE_SIGNALS: Record<Exclude<Signal, number>, true> = {
+  SIGHUP: true,
+  SIGINT: true,
+  SIGQUIT: true,
+  SIGKILL: true,
+  SIGTERM: true,
+  SIGCONT: true,
+  SIGSTOP: true,
+};
 
 interface CommandState {
-  container: Dockerode.Container;
-  exec: Dockerode.Exec;
-  cmdId: string;
-  pidPath: string;
-  cwd: string;
-  startedAt: number;
-  chunks: CommandChunk[];
-  followers: Set<() => void>;
-  completion: Promise<CommandFinished>;
-  resolveCompletion: (result: CommandFinished) => void;
-  rejectCompletion: (error: unknown) => void;
+  readonly client: SandboxClient;
+  readonly sandboxId: string;
+  readonly processId: string;
+  readonly cwd: string;
+  readonly startedAt: number;
+  readonly chunks: CommandChunk[];
+  readonly followers: Set<() => void>;
+  readonly instances: Set<Command>;
+  readonly completion: Promise<CommandFinished>;
+  readonly resolveCompletion: (result: CommandFinished) => void;
+  readonly rejectCompletion: (error: unknown) => void;
+  readonly stdout?: Writable;
+  readonly stderr?: Writable;
   exitCode: number | null;
   durationMs: number | undefined;
   settled: boolean;
   finished: CommandFinished | undefined;
-  instances: Set<Command>;
 }
 
 function collectOutput(state: CommandState, stream: CommandOutput): string {
@@ -111,11 +87,51 @@ function collectOutput(state: CommandState, stream: CommandOutput): string {
     .join("");
 }
 
-function publish(state: CommandState, stream: "stdout" | "stderr", data: string): void {
-  if (data.length === 0) return;
-  state.chunks.push({ stream, data });
+function publish(state: CommandState, chunk: CommandOutputChunk): void {
+  if (chunk.data.length === 0) return;
+  const frontendChunk = { stream: chunk.stream, data: chunk.data };
+  state.chunks.push(frontendChunk);
+  if (chunk.stream === "stdout") state.stdout?.write(chunk.data);
+  else state.stderr?.write(chunk.data);
   for (const wake of state.followers) wake();
   state.followers.clear();
+}
+
+async function pumpCommand(state: CommandState): Promise<void> {
+  let cursor: string | null = null;
+  try {
+    for (;;) {
+      const page = unwrap(await state.client.readCommandOutput({
+        ...requestMetadata(),
+        sandboxId: state.sandboxId,
+        processId: state.processId,
+        stream: "both",
+        cursor,
+        limitBytes: 64 * 1024,
+      }));
+      for (const chunk of page.chunks) publish(state, chunk);
+      cursor = page.nextCursor;
+      if (page.complete) break;
+      await delay(page.chunks.length === 0 ? 10 : 0);
+    }
+    const waited = unwrap(await state.client.waitForCommand({
+      ...requestMetadata(),
+      sandboxId: state.sandboxId,
+      processId: state.processId,
+    }));
+    state.exitCode = waited.result.exitCode;
+    state.durationMs = waited.result.durationMs;
+    for (const instance of state.instances) instance.durationMs = state.durationMs;
+    const finished = new CommandFinished(state as never);
+    state.finished = finished;
+    state.resolveCompletion(finished);
+  } catch (error) {
+    state.rejectCompletion(error);
+  } finally {
+    state.settled = true;
+    for (const wake of state.followers) wake();
+    state.followers.clear();
+  }
 }
 
 async function awaitCompletion(
@@ -125,7 +141,6 @@ async function awaitCompletion(
 ): Promise<CommandFinished> {
   throwIfAborted(signal);
   if (signal === undefined) return state.completion;
-
   const deferred = Promise.withResolvers<CommandFinished>();
   const abort = (): void => {
     onAbort?.();
@@ -149,7 +164,7 @@ export class Command {
   }
 
   get cmdId(): string {
-    return this.#state.cmdId;
+    return this.#state.processId;
   }
 
   get cwd(): string {
@@ -163,7 +178,6 @@ export class Command {
   get exitCode(): number | null {
     return this.#state.exitCode;
   }
-
 
   logs(options: CommandOptions = {}): CommandLogIterator {
     const iterator = this.#iterateLogs(options);
@@ -201,32 +215,16 @@ export class Command {
     signal: Signal = "SIGTERM",
     options: { abortSignal?: AbortSignal } = {},
   ): Promise<void> {
-    if (typeof signal !== "number" && !PORTABLE_SIGNALS.has(signal)) {
+    if (typeof signal !== "number" && PORTABLE_SIGNALS[signal] !== true) {
       throw new TypeError(`Unsupported signal \"${String(signal)}\".`);
     }
     throwIfAborted(options.abortSignal);
-    const info = await this.#state.exec.inspect(
-      options.abortSignal === undefined ? undefined : { abortSignal: options.abortSignal },
-    );
-    if (!info.Running) return;
-
-    try {
-      await rawExec(this.#state.container, {
-        cmd: [
-          "/bin/sh",
-          "-c",
-          'i=0; while [ ! -f \"$1\" ] && [ \"$i\" -lt 100 ]; do sleep 0.01; i=$((i + 1)); done; [ ! -f \"$1\" ] || kill -s \"$2\" \"$(cat \"$1\")\" 2>/dev/null || true',
-          "--",
-          this.#state.pidPath,
-          typeof signal === "number" ? String(signal) : signal.slice(3),
-        ],
-        ...(options.abortSignal === undefined ? {} : { signal: options.abortSignal }),
-      });
-    } catch (error) {
-      const current = await this.#state.exec.inspect().catch(() => undefined);
-      if (current !== undefined && !current.Running) return;
-      throw error;
-    }
+    unwrap(await this.#state.client.signalProcess({
+      ...mutationMetadata(),
+      sandboxId: this.#state.sandboxId,
+      processId: this.#state.processId,
+      signal,
+    }));
   }
 
   async *#iterateLogs(options: CommandOptions): AsyncGenerator<CommandChunk, void, void> {
@@ -270,140 +268,34 @@ export class CommandFinished extends Command {
 }
 
 /** @internal */
-export interface StartCommandOptions {
-  cmd: string[];
-  cwd: string;
-  env: string[];
-  stdout?: Writable;
-  stderr?: Writable;
-  signal?: AbortSignal;
-}
-
-async function pumpCommand(
-  state: CommandState,
-  stream: NodeJS.ReadWriteStream,
-  stdoutTarget?: Writable,
-  stderrTarget?: Writable,
-): Promise<void> {
-  const stdoutDecoder = new StringDecoder("utf8");
-  const stderrDecoder = new StringDecoder("utf8");
-  const stdoutSink = new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      stdoutTarget?.write(chunk);
-      publish(state, "stdout", stdoutDecoder.write(chunk));
-      callback();
-    },
-  });
-  const stderrSink = new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      stderrTarget?.write(chunk);
-      publish(state, "stderr", stderrDecoder.write(chunk));
-      callback();
-    },
-  });
-  docker.modem.demuxStream(stream, stdoutSink, stderrSink);
-
-  try {
-    const ended = Promise.withResolvers<void>();
-    let streamEnded = false;
-    const finish = (): void => {
-      if (streamEnded) return;
-      streamEnded = true;
-      cleanup();
-      ended.resolve();
-    };
-    const fail = (error: Error): void => {
-      if (streamEnded) return;
-      streamEnded = true;
-      cleanup();
-      ended.reject(error);
-    };
-    const cleanup = (): void => {
-      stream.off("end", finish);
-      stream.off("close", finish);
-      stream.off("error", fail);
-    };
-    stream.once("end", finish);
-    stream.once("close", finish);
-    stream.once("error", fail);
-    await ended.promise;
-
-    publish(state, "stdout", stdoutDecoder.end());
-    publish(state, "stderr", stderrDecoder.end());
-    let info = await state.exec.inspect();
-    while (info.Running) {
-      await delay(10);
-      info = await state.exec.inspect();
-    }
-    state.exitCode = info.ExitCode ?? 0;
-    state.durationMs = Date.now() - state.startedAt;
-    for (const instance of state.instances) instance.durationMs = state.durationMs;
-    const finished = new CommandFinished(state as never);
-    state.finished = finished;
-    state.resolveCompletion(finished);
-  } catch (error) {
-    try {
-      translateDockerError(error);
-    } catch (translated) {
-      state.rejectCompletion(translated);
-    }
-  } finally {
-    state.settled = true;
-    for (const wake of state.followers) wake();
-    state.followers.clear();
-  }
-}
-
-/** @internal */
-export async function startCommand(
-  container: Dockerode.Container,
-  options: StartCommandOptions,
-): Promise<Command> {
-  throwIfAborted(options.signal);
-  const pidPath = `/tmp/localbox/command-${randomUUID()}.pid`;
-  try {
-    const exec = await container.exec({
-      AttachStdin: false,
-      AttachStdout: true,
-      AttachStderr: true,
-      Tty: false,
-      Cmd: ["node", "--input-type=module", "-e", COMMAND_WRAPPER, pidPath, ...options.cmd],
-      WorkingDir: options.cwd,
-      Env: options.env,
-      ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
-    });
-    throwIfAborted(options.signal);
-    const stream = await exec.start({
-      Detach: false,
-      Tty: false,
-      hijack: true,
-      stdin: false,
-      ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
-    });
-    const completion = Promise.withResolvers<CommandFinished>();
-    const state: CommandState = {
-      container,
-      exec,
-      cmdId: exec.id,
-      pidPath,
-      cwd: options.cwd,
-      startedAt: Date.now(),
-      chunks: [],
-      followers: new Set(),
-      completion: completion.promise,
-      resolveCompletion: completion.resolve,
-      rejectCompletion: completion.reject,
-      exitCode: null,
-      durationMs: undefined,
-      settled: false,
-      finished: undefined,
-      instances: new Set(),
-    };
-    const command = new Command(state as never);
-    void pumpCommand(state, stream, options.stdout, options.stderr);
-    return command;
-  } catch (error) {
-    if (options.signal?.aborted) throw abortError();
-    translateDockerError(error);
-  }
+export function createCommand(
+  client: SandboxClient,
+  sandboxId: string,
+  process: ProcessRecord,
+  stdout?: Writable,
+  stderr?: Writable,
+): Command {
+  const completion = Promise.withResolvers<CommandFinished>();
+  const state: CommandState = {
+    client,
+    sandboxId,
+    processId: process.processId,
+    cwd: process.cwd,
+    startedAt: process.startedAt,
+    chunks: [],
+    followers: new Set(),
+    instances: new Set(),
+    completion: completion.promise,
+    resolveCompletion: completion.resolve,
+    rejectCompletion: completion.reject,
+    ...(stdout === undefined ? {} : { stdout }),
+    ...(stderr === undefined ? {} : { stderr }),
+    exitCode: process.exitCode,
+    durationMs: undefined,
+    settled: false,
+    finished: undefined,
+  };
+  const command = new Command(state as never);
+  void pumpCommand(state);
+  return command;
 }

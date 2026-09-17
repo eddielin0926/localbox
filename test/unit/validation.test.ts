@@ -11,9 +11,10 @@ import {
   UnsupportedSandboxCapabilityError,
 } from "../../src/vercel/index.js";
 import type { SandboxCreateOptions } from "../../src/vercel/types.js";
-import { dockerContainerName } from "../../src/vercel/sandbox.js";
+import { InvalidSandboxOptionsError as DockerInvalidSandboxOptionsError } from "../../src/backends/docker/errors.js";
+import { resolveSandboxImage } from "../../src/backends/docker/managed-images.js";
+import { dockerContainerName } from "../../src/backends/docker/sandbox.js";
 import { resolveSandboxPath } from "../../src/vercel/filesystem.js";
-import { resolveSandboxImage } from "../../src/vercel/managed-images.js";
 
 describe("sandbox option validation", () => {
   test("rejects invalid create options before contacting Docker", async () => {
@@ -77,7 +78,7 @@ describe("sandbox option validation", () => {
       "registry.example.test/team/image:v1",
     );
     expect(() => resolveSandboxImage({ image: "vercel/sandbox/node:999" })).toThrow(
-      InvalidSandboxOptionsError,
+      DockerInvalidSandboxOptionsError,
     );
   });
 

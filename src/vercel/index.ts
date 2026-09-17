@@ -35,7 +35,7 @@ export {
   MANAGED_IMAGES,
   MANAGED_IMAGE_REGISTRY,
   MANAGED_IMAGE_UPSTREAM_COMMIT,
-} from "./managed-images.js";
+} from "../runtime/index.js";
 export type {
   NetworkPolicy,
   NetworkPolicyKeyValueMatcher,

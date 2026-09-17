@@ -1,15 +1,7 @@
-import { randomUUID } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
 import { posix } from "node:path";
-import type { SandboxClient } from "../runtime/index.js";
-import { createCommand } from "./command.js";
-import {
-  mutationMetadata,
-  requestMetadata,
-  throwIfAborted,
-  unwrap,
-  withAbort,
-} from "./client.js";
+import type Dockerode from "dockerode";
+import { rawExec, throwIfAborted } from "./docker.js";
 
 const WORKSPACE = "/vercel/sandbox";
 const ERROR_PREFIX = "LOCALBOX_ERROR:";
@@ -18,7 +10,11 @@ const FILESYSTEM_BRIDGE = String.raw`
 import * as fs from "node:fs/promises";
 const op = process.argv[1];
 const args = JSON.parse(process.argv[2]);
-const input = () => Buffer.from(args.stdin ?? "", "base64");
+const readStdin = async () => {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks);
+};
 const json = (value) => process.stdout.write(JSON.stringify(value ?? null));
 const stats = (value) => ({
   dev: value.dev,
@@ -58,7 +54,10 @@ const dirent = (value, parentPath) => ({
 });
 try {
   switch (op) {
-    case "appendFile": await fs.appendFile(args.path, input(), args.options); break;
+    case "readFile": process.stdout.write(await fs.readFile(args.path)); break;
+    case "writeFile": await fs.writeFile(args.path, await readStdin(), args.options); break;
+    case "appendFile": await fs.appendFile(args.path, await readStdin(), args.options); break;
+    case "mkdir": json(await fs.mkdir(args.path, args.options)); break;
     case "readdir": {
       const entries = await fs.readdir(args.path, { withFileTypes: args.withFileTypes });
       json(args.withFileTypes ? entries.map((entry) => dirent(entry, args.path)) : entries);
@@ -132,12 +131,6 @@ type SerializedFileType =
   | "socket"
   | "unknown";
 
-interface FileSystemState {
-  readonly client: SandboxClient;
-  readonly sandboxId: string;
-  readonly ensureRunning: (signal?: AbortSignal) => Promise<void>;
-}
-
 export interface FileReadOptions {
   encoding?: BufferEncoding | null;
   signal?: AbortSignal;
@@ -186,6 +179,7 @@ function fileError(stderr: Buffer): NodeFileError {
   const text = stderr.toString("utf8");
   const marker = text.indexOf(ERROR_PREFIX);
   if (marker === -1) return new Error("The filesystem operation failed inside the sandbox.");
+
   const payload = JSON.parse(text.slice(marker + ERROR_PREFIX.length)) as {
     message: string;
     code?: string;
@@ -200,7 +194,9 @@ function fileError(stderr: Buffer): NodeFileError {
 }
 
 function assertEncoding(encoding: string): asserts encoding is BufferEncoding {
-  if (!Buffer.isEncoding(encoding)) throw new TypeError(`Unsupported encoding "${encoding}".`);
+  if (!Buffer.isEncoding(encoding)) {
+    throw new TypeError(`Unsupported encoding "${encoding}".`);
+  }
 }
 
 function statsFromPayload(payload: SerializedStats): Stats {
@@ -238,14 +234,19 @@ function direntFromPayload(payload: SerializedDirent): Dirent {
 }
 
 export class FileSystem {
-  readonly #state: FileSystemState;
+  readonly #docker: Dockerode;
+  readonly #getRunningContainer: () => Promise<Dockerode.Container>;
 
-  constructor(internalFactory: never) {
-    this.#state = internalFactory as FileSystemState;
+  constructor(docker: Dockerode, internalFactory: never) {
+    this.#docker = docker;
+    this.#getRunningContainer = internalFactory as () => Promise<Dockerode.Container>;
   }
 
   readFile(path: string, options?: { encoding?: null; signal?: AbortSignal } | null): Promise<Buffer>;
-  readFile(path: string, options: { encoding: BufferEncoding; signal?: AbortSignal } | BufferEncoding): Promise<string>;
+  readFile(
+    path: string,
+    options: { encoding: BufferEncoding; signal?: AbortSignal } | BufferEncoding,
+  ): Promise<string>;
   async readFile(
     path: string,
     options?: FileReadOptions | BufferEncoding | null,
@@ -253,23 +254,7 @@ export class FileSystem {
     const encoding = typeof options === "string" ? options : options?.encoding;
     if (encoding !== null && encoding !== undefined) assertEncoding(encoding);
     const signal = typeof options === "object" && options !== null ? options.signal : undefined;
-    await this.#state.ensureRunning(signal);
-    const chunks: Buffer[] = [];
-    let offset = 0;
-    for (;;) {
-      const page = unwrap(await withAbort(this.#state.client.readFile({
-        ...requestMetadata(),
-        sandboxId: this.#state.sandboxId,
-        path: resolveSandboxPath(path),
-        offset,
-        limitBytes: 1024 * 1024,
-        encoding: "base64",
-      }), signal));
-      chunks.push(Buffer.from(page.content.data, "base64"));
-      if (page.endOfFile) break;
-      offset = page.nextOffset;
-    }
-    const output = Buffer.concat(chunks);
+    const output = await this.#run("readFile", { path: resolveSandboxPath(path) }, undefined, signal);
     return encoding === null || encoding === undefined ? output : output.toString(encoding);
   }
 
@@ -279,18 +264,16 @@ export class FileSystem {
     options: FileWriteOptions | BufferEncoding = {},
   ): Promise<void> {
     const normalized = typeof options === "string" ? { encoding: options } : options;
-    await this.#state.ensureRunning(normalized.signal);
     if (normalized.encoding !== undefined) assertEncoding(normalized.encoding);
     const contents = typeof data === "string"
       ? Buffer.from(data, normalized.encoding ?? "utf8")
       : Buffer.from(data);
-    unwrap(await withAbort(this.#state.client.writeFile({
-      ...mutationMetadata(),
-      sandboxId: this.#state.sandboxId,
-      path: resolveSandboxPath(path),
-      content: { encoding: "base64", data: contents.toString("base64") },
-      mode: normalized.mode ?? null,
-    }), normalized.signal));
+    await this.#run(
+      "writeFile",
+      { path: resolveSandboxPath(path), options: normalized.mode === undefined ? {} : { mode: normalized.mode } },
+      contents,
+      normalized.signal,
+    );
   }
 
   async appendFile(
@@ -305,10 +288,7 @@ export class FileSystem {
       : Buffer.from(data);
     await this.#run(
       "appendFile",
-      {
-        path: resolveSandboxPath(path),
-        options: normalized.mode === undefined ? {} : { mode: normalized.mode },
-      },
+      { path: resolveSandboxPath(path), options: normalized.mode === undefined ? {} : { mode: normalized.mode } },
       contents,
       normalized.signal,
     );
@@ -316,21 +296,28 @@ export class FileSystem {
 
   async mkdir(path: string, options: FileMkdirOptions | number = {}): Promise<string | undefined> {
     const normalized = typeof options === "number" ? { mode: options } : options;
-    await this.#state.ensureRunning(normalized.signal);
-    const resolved = resolveSandboxPath(path);
-    const result = unwrap(await withAbort(this.#state.client.makeDirectory({
-      ...mutationMetadata(),
-      sandboxId: this.#state.sandboxId,
-      path: resolved,
-      recursive: normalized.recursive ?? false,
-      mode: normalized.mode ?? null,
-    }), normalized.signal));
-    return result.created ? resolved : undefined;
+    const output = await this.#run(
+      "mkdir",
+      {
+        path: resolveSandboxPath(path),
+        options: {
+          recursive: normalized.recursive ?? false,
+          ...(normalized.mode === undefined ? {} : { mode: normalized.mode }),
+        },
+      },
+      undefined,
+      normalized.signal,
+    );
+    const created = JSON.parse(output.toString("utf8")) as string | null;
+    return created ?? undefined;
   }
 
   readdir(path: string, options?: FileReaddirOptions & { withFileTypes?: false }): Promise<string[]>;
   readdir(path: string, options: FileReaddirOptions & { withFileTypes: true }): Promise<Dirent[]>;
-  async readdir(path: string, options: FileReaddirOptions = {}): Promise<string[] | Dirent[]> {
+  async readdir(
+    path: string,
+    options: FileReaddirOptions = {},
+  ): Promise<string[] | Dirent[]> {
     const output = await this.#run(
       "readdir",
       { path: resolveSandboxPath(path), withFileTypes: options.withFileTypes ?? false },
@@ -360,7 +347,10 @@ export class FileSystem {
   async rm(path: string, options: FileRemoveOptions = {}): Promise<void> {
     await this.#run(
       "rm",
-      { path: resolveSandboxPath(path), options: { recursive: options.recursive ?? false, force: options.force ?? false } },
+      {
+        path: resolveSandboxPath(path),
+        options: { recursive: options.recursive ?? false, force: options.force ?? false },
+      },
       undefined,
       options.signal,
     );
@@ -402,7 +392,11 @@ export class FileSystem {
     }
   }
 
-  async chmod(path: string, mode: number | string, options: FileChmodOptions = {}): Promise<void> {
+  async chmod(
+    path: string,
+    mode: number | string,
+    options: FileChmodOptions = {},
+  ): Promise<void> {
     await this.#run("chmod", { path: resolveSandboxPath(path), mode }, undefined, options.signal);
   }
 
@@ -421,7 +415,12 @@ export class FileSystem {
     options: FileOperationOptions = {},
   ): Promise<void> {
     if (target.includes("\0")) throw new TypeError("File paths cannot contain NUL bytes.");
-    await this.#run("symlink", { target, path: resolveSandboxPath(path) }, undefined, options.signal);
+    await this.#run(
+      "symlink",
+      { target, path: resolveSandboxPath(path) },
+      undefined,
+      options.signal,
+    );
   }
 
   async readlink(path: string, options: FileOperationOptions = {}): Promise<string> {
@@ -434,7 +433,11 @@ export class FileSystem {
     return JSON.parse(output.toString("utf8")) as string;
   }
 
-  async truncate(path: string, len = 0, options: FileOperationOptions = {}): Promise<void> {
+  async truncate(
+    path: string,
+    len = 0,
+    options: FileOperationOptions = {},
+  ): Promise<void> {
     await this.#run("truncate", { path: resolveSandboxPath(path), len }, undefined, options.signal);
   }
 
@@ -450,48 +453,27 @@ export class FileSystem {
 
   async #run(
     operation: string,
-    args: Record<string, unknown>,
+    args: object,
     stdin?: Buffer,
     signal?: AbortSignal,
   ): Promise<Buffer> {
-    await this.#state.ensureRunning(signal);
     throwIfAborted(signal);
-    const processId = randomUUID();
-    const nodeArguments = [
-      "--input-type=module",
-      "-e",
-      FILESYSTEM_BRIDGE,
-      operation,
-      JSON.stringify({
-        ...args,
-        ...(stdin === undefined ? {} : { stdin: stdin.toString("base64") }),
-      }),
-    ];
-    const started = unwrap(await withAbort(this.#state.client.startCommand({
-      ...mutationMetadata(),
-      sandboxId: this.#state.sandboxId,
-      processId,
-      command: {
-        command: operation === "chown" ? "sudo" : "node",
-        arguments: operation === "chown" ? ["node", ...nodeArguments] : nodeArguments,
-        cwd: WORKSPACE,
-        environment: {},
-      },
-      outputLimitBytes: 16 * 1024 * 1024,
-    }), signal));
-    const command = createCommand(this.#state.client, this.#state.sandboxId, started.process);
-    const finished = await command.wait(signal === undefined ? {} : { signal });
-    const stdout = Buffer.from(await finished.stdout());
-    if (finished.exitCode !== 0) throw fileError(Buffer.from(await finished.stderr()));
-    return stdout;
+    const container = await this.#getRunningContainer();
+    const result = await rawExec(this.#docker, container, {
+      cmd: ["node", "--input-type=module", "-e", FILESYSTEM_BRIDGE, operation, JSON.stringify(args)],
+      ...(operation === "chown" ? { user: "0" } : {}),
+      ...(stdin === undefined ? {} : { stdin }),
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (result.exitCode !== 0) throw fileError(result.stderr);
+    return result.stdout;
   }
 }
 
 /** @internal */
 export function createFileSystem(
-  client: SandboxClient,
-  sandboxId: string,
-  ensureRunning: (signal?: AbortSignal) => Promise<void>,
+  docker: Dockerode,
+  getRunningContainer: () => Promise<Dockerode.Container>,
 ): FileSystem {
-  return new FileSystem({ client, sandboxId, ensureRunning } as never);
+  return new FileSystem(docker, getRunningContainer as never);
 }

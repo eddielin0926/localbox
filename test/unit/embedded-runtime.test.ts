@@ -112,7 +112,10 @@ function sandboxRecord(
     name: request.spec.name,
     status: "running",
     persistent: request.spec.persistent,
-    bootSource: request.spec.bootSource,
+    bootSource: request.spec.bootSource.type === "image"
+      ? request.spec.bootSource
+      : { type: "image", image: `resolved:${request.spec.bootSource.runtime}` },
+    runtime: request.spec.bootSource.type === "runtime" ? request.spec.bootSource.runtime : null,
     backend,
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
@@ -121,6 +124,7 @@ function sandboxRecord(
     timeoutMs: request.spec.timeoutMs,
     tags: request.spec.tags,
     ports: request.spec.ports,
+    endpoints: [],
     resources: request.spec.resources,
     region: request.spec.region,
     failoverRegions: request.spec.failoverRegions,
