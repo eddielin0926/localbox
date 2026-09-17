@@ -93,6 +93,8 @@ export interface BackendConformanceHarness {
   readonly capabilities: SandboxCapabilities;
   readonly sourceFixtures?: Readonly<Partial<Record<"git" | "tarball", SandboxSource>>>;
   createClient(): SandboxClient | Promise<SandboxClient>;
+  /** A second runtime sharing the same durable state root, when supported. */
+  createPeerClient?(): SandboxClient | Promise<SandboxClient>;
   sandboxSpec(name: string, overrides?: SandboxSpecOverrides): SandboxSpec;
   uniqueSandboxName(profile: string): string;
   cleanup(client: SandboxClient, sandboxId: string): Promise<void>;
@@ -357,6 +359,29 @@ export function registerBackendConformanceProfiles(harness: BackendConformanceHa
       });
       expect(missing).toMatchObject({ ok: false, error: { category: "not-found" } });
     });
+
+    if (harness.createPeerClient !== undefined) {
+      profileTest(harness, [], "sandbox names are owned across runtime instances", async (context) => {
+        const name = harness.uniqueSandboxName("cross-runtime-name");
+        context.sandboxIds.add(name);
+        unwrap(await context.client.createSandbox(createRequest(harness, name)));
+        const peer = await harness.createPeerClient!();
+        const conflict = await peer.createSandbox(createRequest(
+          harness,
+          name,
+          [],
+          {},
+          requestId(`peer-create:${name}`),
+        ));
+        expect(conflict).toMatchObject({
+          ok: false,
+          error: {
+            category: "already-exists",
+            details: { type: "resource", resource: "sandbox", resourceId: name },
+          },
+        });
+      });
+    }
 
     profileTest(harness, [], "ephemeral stop removes the sandbox", async (context) => {
       const sandboxId = await createSandbox(harness, context, "ephemeral", [], {

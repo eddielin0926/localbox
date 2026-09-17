@@ -1,6 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { FilesystemBridge } from "./filesystem-bridge.js";
 import { negotiateSandboxRequirements } from "./capabilities.js";
+import {
+  isLocalStateOwnerAlive,
+  LocalSandboxOwnershipError,
+  LocalSandboxStateConflictError,
+  LocalSandboxStateStore,
+  sandboxNameDigest,
+} from "./local-state.js";
+import type {
+  LocalSandboxClaim,
+  LocalSandboxStateInspection,
+  LocalSandboxStateRecord,
+} from "./local-state.js";
 import type {
   BackendReference,
   ClientFailure,
@@ -38,6 +50,7 @@ import type {
   SandboxClient,
   SandboxErrorDetails,
   SandboxCapabilities,
+  SandboxRecord,
   SandboxRequirementIssue,
   SignalProcessRequest,
   SignalProcessResult,
@@ -268,6 +281,63 @@ function backendFailure(
       backend,
       details: { type: "backend", operation },
     },
+  };
+}
+
+function stateFailure(
+  request: RequestMetadata,
+  backend: BackendReference,
+  operation: string,
+): ClientFailure {
+  return {
+    ok: false,
+    error: {
+      category: "internal",
+      code: "LOCALBOX_STATE_FAILURE",
+      message: "Localbox could not durably update sandbox ownership state.",
+      retryable: false,
+      requestId: request.requestId,
+      backend,
+      details: { type: "backend", operation },
+    },
+  };
+}
+
+function nameConflict(
+  request: RequestMetadata & { readonly sandboxId: string },
+  backend: BackendReference,
+  name: string,
+): ClientFailure {
+  return {
+    ok: false,
+    error: {
+      category: "already-exists",
+      code: "LOCALBOX_SANDBOX_ALREADY_EXISTS",
+      message: `Sandbox name "${name}" is already owned.`,
+      retryable: false,
+      requestId: request.requestId,
+      backend,
+      details: {
+        type: "resource",
+        resource: "sandbox",
+        resourceId: request.sandboxId,
+      },
+    },
+  };
+}
+
+function sameBackend(left: BackendReference, right: BackendReference): boolean {
+  return left.backendId === right.backendId && left.backendType === right.backendType;
+}
+
+function claimFromState(record: LocalSandboxStateRecord): LocalSandboxClaim {
+  return {
+    name: record.name,
+    digest: sandboxNameDigest(record.name),
+    backend: record.backend,
+    token: record.token,
+    owner: record.owner,
+    claimedAt: record.claimedAt,
   };
 }
 
@@ -688,6 +758,15 @@ function replayMutationResult<Result extends JsonObject>(
     },
   };
 }
+const INTERRUPTED_CLAIM_GRACE_MS = 5_000;
+
+export interface EmbeddedSandboxClientOptions {
+  /** Explicit state root for isolated runtimes and tests. */
+  readonly stateRoot?: string;
+  /** Preconstructed store for dependency injection. Mutually exclusive with stateRoot. */
+  readonly stateStore?: LocalSandboxStateStore;
+}
+
 /** In-process client bound permanently to one explicitly supplied backend. */
 export class EmbeddedSandboxClient implements SandboxClient {
   readonly backend: SandboxBackend;
@@ -696,10 +775,14 @@ export class EmbeddedSandboxClient implements SandboxClient {
   readonly #processes = new Map<string, RuntimeProcess>();
   readonly #mutations = new Map<string, IdempotentMutation>();
   readonly #filesystem: FilesystemBridge;
+  readonly #state: LocalSandboxStateStore;
 
-  constructor(backend: SandboxBackend) {
+  constructor(backend: SandboxBackend, options: EmbeddedSandboxClientOptions = {}) {
     if (!isBackendReference(backend.reference)) {
       throw new TypeError("EmbeddedSandboxClient requires a valid backend reference.");
+    }
+    if (options.stateRoot !== undefined && options.stateStore !== undefined) {
+      throw new TypeError("EmbeddedSandboxClient accepts either stateRoot or stateStore, not both.");
     }
     this.backend = backend;
     this.backendReference = Object.freeze({
@@ -708,6 +791,8 @@ export class EmbeddedSandboxClient implements SandboxClient {
     });
     this.#capabilities = backend.capabilities;
     this.#filesystem = new FilesystemBridge(backend);
+    this.#state = options.stateStore ??
+      new LocalSandboxStateStore(options.stateRoot === undefined ? {} : { root: options.stateRoot });
   }
 
   createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
@@ -724,32 +809,131 @@ export class EmbeddedSandboxClient implements SandboxClient {
     if (issues.length > 0) {
       return Promise.resolve(requirementFailure(request, selected, issues));
     }
-    return this.#idempotent(
-      "createSandbox",
-      request,
-      () => this.#invoke("createSandbox", request),
-    );
+    return this.#idempotent("createSandbox", request, () => this.#createSandbox(request));
+  }
+
+  async #createSandbox(request: CreateSandboxRequest): Promise<ClientResult<CreateSandboxResult>> {
+    let claim: LocalSandboxClaim | ClientFailure;
+    try {
+      claim = await this.#claimForCreate(request);
+    } catch {
+      return stateFailure(request, this.backendReference, "claimSandboxName");
+    }
+    if ("ok" in claim) return claim;
+
+    const result = await this.#invoke("createSandbox", request);
+    if (!result.ok) {
+      if (result.error.category === "already-exists") {
+        const observed = await this.#invoke("getSandbox", {
+          requestId: request.requestId,
+          idempotencyKey: request.idempotencyKey,
+          deadline: request.deadline,
+          sandboxId: request.sandboxId,
+          resume: false,
+        });
+        if (observed.ok) {
+          try {
+            await this.#state.commit(claim, observed.value.sandbox);
+          } catch {
+            return stateFailure(request, this.backendReference, "repairExistingSandboxState");
+          }
+          return result;
+        }
+        if (observed.error.category !== "not-found") return observed;
+      }
+      await this.#state.release(claim).catch(() => undefined);
+      return result;
+    }
+    try {
+      await this.#state.commit(claim, result.value.sandbox);
+      return result;
+    } catch {
+      // The backend resource is live. Preserve its claim so reconciliation can
+      // repair metadata instead of allowing a duplicate allocation.
+      return stateFailure(request, this.backendReference, "commitSandboxState");
+    }
   }
 
   getSandbox(request: GetSandboxRequest): Promise<ClientResult<GetSandboxResult>> {
-    if (!request.resume) return this.#invoke("getSandbox", request);
-    return this.#idempotent("resumeSandbox", request, () => this.#invoke("getSandbox", request));
+    if (!request.resume) return this.#getSandbox(request);
+    return this.#idempotent("resumeSandbox", request, () => this.#getSandbox(request));
   }
 
-  listSandboxes(request: ListSandboxesRequest): Promise<ClientResult<ListSandboxesResult>> {
-    return this.#invoke("listSandboxes", request);
+  async #getSandbox(request: GetSandboxRequest): Promise<ClientResult<GetSandboxResult>> {
+    const result = await this.#invoke("getSandbox", request);
+    if (!result.ok) {
+      if (result.error.category === "not-found") await this.#cleanupAbsent(request.sandboxId);
+      return result;
+    }
+    try {
+      await this.#refreshObserved(result.value.sandbox);
+      return result;
+    } catch {
+      return stateFailure(request, this.backendReference, request.resume ? "resumeSandboxState" : "getSandboxState");
+    }
+  }
+
+  async listSandboxes(request: ListSandboxesRequest): Promise<ClientResult<ListSandboxesResult>> {
+    const result = await this.#invoke("listSandboxes", request);
+    if (!result.ok) return result;
+    try {
+      for (const sandbox of result.value.sandboxes) await this.#refreshObserved(sandbox);
+      return result;
+    } catch {
+      return stateFailure(request, this.backendReference, "listSandboxState");
+    }
   }
 
   stopSandbox(request: StopSandboxRequest): Promise<ClientResult<StopSandboxResult>> {
-    return this.#idempotent("stopSandbox", request, () => this.#invoke("stopSandbox", request));
+    return this.#idempotent("stopSandbox", request, async () => {
+      const result = await this.#invoke("stopSandbox", request);
+      if (!result.ok) {
+        if (result.error.category === "not-found") await this.#cleanupAbsent(request.sandboxId);
+        return result;
+      }
+      try {
+        await this.#refreshObserved(result.value.sandbox);
+        return result;
+      } catch {
+        return stateFailure(request, this.backendReference, "stopSandboxState");
+      }
+    });
   }
 
   deleteSandbox(
     request: DeleteSandboxRequest,
   ): Promise<ClientResult<DeleteSandboxResult>> {
     return this.#idempotent("deleteSandbox", request, async () => {
+      let ownership: LocalSandboxStateInspection;
+      try {
+        ownership = await this.#state.inspect(request.sandboxId);
+        if (ownership.status === "missing") {
+          const active = await this.#state.findActiveBySandboxId(
+            request.sandboxId,
+            this.backendReference,
+          );
+          if (active !== null) {
+            ownership = { status: "record", directoryModifiedAt: 0, record: active };
+          }
+        }
+      } catch {
+        return stateFailure(request, this.backendReference, "inspectDeleteOwnership");
+      }
       const result = await this.#invoke("deleteSandbox", request);
-      if (!result.ok) return result;
+      if (!result.ok) {
+        if (result.error.category === "not-found") await this.#cleanupAbsent(request.sandboxId);
+        return result;
+      }
+
+      try {
+        if (ownership.status === "record" && sameBackend(ownership.record.backend, this.backendReference)) {
+          await this.#state.release(claimFromState(ownership.record));
+        } else if (ownership.status === "empty" || ownership.status === "corrupt") {
+          await this.#state.reclaimInvalid(request.sandboxId);
+        }
+      } catch {
+        return stateFailure(request, this.backendReference, "releaseDeletedSandbox");
+      }
 
       const disposals: Promise<void>[] = [];
       for (const [key, state] of this.#processes) {
@@ -766,11 +950,169 @@ export class EmbeddedSandboxClient implements SandboxClient {
   extendSandboxDeadline(
     request: ExtendSandboxDeadlineRequest,
   ): Promise<ClientResult<ExtendSandboxDeadlineResult>> {
-    return this.#idempotent(
-      "extendSandboxDeadline",
-      request,
-      () => this.#invoke("extendSandboxDeadline", request),
-    );
+    return this.#idempotent("extendSandboxDeadline", request, async () => {
+      const result = await this.#invoke("extendSandboxDeadline", request);
+      if (!result.ok) {
+        if (result.error.category === "not-found") await this.#cleanupAbsent(request.sandboxId);
+        return result;
+      }
+      try {
+        await this.#refreshObserved(result.value.sandbox);
+        return result;
+      } catch {
+        return stateFailure(request, this.backendReference, "extendSandboxDeadlineState");
+      }
+    });
+  }
+
+  async #claimForCreate(request: CreateSandboxRequest): Promise<LocalSandboxClaim | ClientFailure> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        return await this.#state.acquire(request.spec.name, this.backendReference);
+      } catch (error) {
+        if (!(error instanceof LocalSandboxStateConflictError)) throw error;
+      }
+      const reconciled = await this.#reconcileCreateConflict(request);
+      if (reconciled !== null) return reconciled;
+    }
+    return nameConflict(request, this.backendReference, request.spec.name);
+  }
+
+  async #reconcileCreateConflict(request: CreateSandboxRequest): Promise<ClientFailure | null> {
+    const ownership = await this.#state.inspect(request.spec.name);
+    if (ownership.status === "missing") return null;
+    if (
+      ownership.status === "record" &&
+      !sameBackend(ownership.record.backend, this.backendReference)
+    ) {
+      return nameConflict(request, this.backendReference, request.spec.name);
+    }
+
+    const sandboxId = ownership.status === "record" && ownership.record.kind === "active"
+      ? ownership.record.sandbox.sandboxId
+      : request.sandboxId;
+    const probe = await this.#invoke("getSandbox", {
+      requestId: request.requestId,
+      idempotencyKey: request.idempotencyKey,
+      deadline: request.deadline,
+      sandboxId,
+      resume: false,
+    });
+    if (probe.ok) {
+      try {
+        if (ownership.status === "record") {
+          const claim = claimFromState(ownership.record);
+          if (ownership.record.kind === "claim") {
+            await this.#state.commit(claim, probe.value.sandbox);
+          } else {
+            await this.#state.update(claim, probe.value.sandbox);
+          }
+        } else {
+          await this.#state.repair(request.spec.name, this.backendReference, probe.value.sandbox);
+        }
+      } catch (error) {
+        if (!(error instanceof LocalSandboxOwnershipError)) {
+          return stateFailure(request, this.backendReference, "repairSandboxState");
+        }
+      }
+      return nameConflict(request, this.backendReference, request.spec.name);
+    }
+    if (probe.error.category !== "not-found") return probe;
+
+    if (ownership.status === "record") {
+      if (ownership.record.kind === "claim" && isLocalStateOwnerAlive(ownership.record.owner)) {
+        return nameConflict(request, this.backendReference, request.spec.name);
+      }
+      try {
+        await this.#state.release(claimFromState(ownership.record));
+      } catch (error) {
+        if (error instanceof LocalSandboxOwnershipError) return null;
+        throw error;
+      }
+      return null;
+    }
+    if (Date.now() - ownership.directoryModifiedAt < INTERRUPTED_CLAIM_GRACE_MS) {
+      return nameConflict(request, this.backendReference, request.spec.name);
+    }
+    try {
+      await this.#state.reclaimInvalid(request.spec.name);
+    } catch (error) {
+      if (error instanceof LocalSandboxOwnershipError) return null;
+      throw error;
+    }
+    return null;
+  }
+
+  async #refreshObserved(sandbox: SandboxRecord): Promise<void> {
+    if (!sameBackend(sandbox.backend, this.backendReference)) {
+      throw new LocalSandboxOwnershipError("The observed sandbox belongs to a different backend.");
+    }
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const ownership = await this.#state.inspect(sandbox.name);
+      if (ownership.status === "missing") {
+        try {
+          const claim = await this.#state.acquire(sandbox.name, this.backendReference);
+          await this.#state.commit(claim, sandbox);
+          return;
+        } catch (error) {
+          if (error instanceof LocalSandboxStateConflictError || error instanceof LocalSandboxOwnershipError) {
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (ownership.status === "empty" || ownership.status === "corrupt") {
+        try {
+          await this.#state.repair(sandbox.name, this.backendReference, sandbox);
+          return;
+        } catch (error) {
+          if (error instanceof LocalSandboxOwnershipError) continue;
+          throw error;
+        }
+      }
+      if (!sameBackend(ownership.record.backend, this.backendReference)) {
+        throw new LocalSandboxOwnershipError("The sandbox name is owned by a different backend.");
+      }
+      if (
+        ownership.record.kind === "active" &&
+        ownership.record.sandbox.sandboxId !== sandbox.sandboxId
+      ) {
+        throw new LocalSandboxOwnershipError("The sandbox name maps to a different backend resource.");
+      }
+      const claim = claimFromState(ownership.record);
+      try {
+        if (ownership.record.kind === "claim") await this.#state.commit(claim, sandbox);
+        else await this.#state.update(claim, sandbox);
+        return;
+      } catch (error) {
+        if (error instanceof LocalSandboxOwnershipError) continue;
+        throw error;
+      }
+    }
+    throw new LocalSandboxOwnershipError("Sandbox ownership changed repeatedly during refresh.");
+  }
+
+  async #cleanupAbsent(name: string): Promise<void> {
+    try {
+      let ownership = await this.#state.inspect(name);
+      if (ownership.status === "missing") {
+        const active = await this.#state.findActiveBySandboxId(name, this.backendReference);
+        if (active === null) return;
+        ownership = { status: "record", directoryModifiedAt: 0, record: active };
+      }
+      if (ownership.status === "record") {
+        if (!sameBackend(ownership.record.backend, this.backendReference)) return;
+        if (ownership.record.kind === "claim" && isLocalStateOwnerAlive(ownership.record.owner)) return;
+        await this.#state.release(claimFromState(ownership.record));
+        return;
+      }
+      if (Date.now() - ownership.directoryModifiedAt >= INTERRUPTED_CLAIM_GRACE_MS) {
+        await this.#state.reclaimInvalid(name);
+      }
+    } catch {
+      // A not-found backend result remains authoritative. Races and local I/O
+      // failures preserve ownership rather than risking a successor's claim.
+    }
   }
 
   startCommand(request: StartCommandRequest): Promise<ClientResult<StartCommandResult>> {
