@@ -13,7 +13,7 @@ By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development setup
 
-You need Node.js 22.12 or newer, pnpm 12.3.4, and a reachable Docker daemon for integration and smoke checks.
+You need Node.js 22.12 or newer and pnpm 12.3.4. Docker is required for the default integration and smoke checks; Podman checks require a reachable rootless or rootful API socket.
 
 ```sh
 git clone https://github.com/<your-user>/localbox.git
@@ -35,16 +35,17 @@ Create a focused branch from the current `main` branch. Keep unrelated changes i
 
 Run the smallest checks that cover your change:
 
-| Command | Purpose | Docker required |
+| Command | Purpose | Container engine required |
 | --- | --- | --- |
 | `pnpm typecheck` | Check TypeScript source and type tests. | No |
 | `pnpm test:unit` | Run unit tests. | No |
 | `pnpm build` | Build the published package. | No |
-| `pnpm test:integration` | Exercise sandbox behavior against Docker. | Yes |
-| `pnpm smoke` | Run the end-to-end example after building. | Yes |
+| `pnpm test:integration` | Exercise default sandbox behavior against Docker; Podman conformance is skipped unless configured. | Docker |
+| `LOCALBOX_PODMAN_SOCKET=/absolute/podman.sock LOCALBOX_PODMAN_MODE=rootless pnpm test:podman` | Exercise Podman availability and applicable backend conformance profiles. Use `rootful` for a rootful service. | Podman |
+| `pnpm smoke` | Run the end-to-end default example after building. | Docker |
 | `pnpm compatibility:vercel` | Print the current Vercel compatibility report. | No |
 
-For most changes, run type checking, unit tests, and the build. Run integration and smoke checks when changing Docker, lifecycle, command, filesystem, port, or timeout behavior.
+For most changes, run type checking, unit tests, and the build. Run the applicable Docker and/or Podman integration checks when changing container-engine lifecycle, command, filesystem, port, persistence, timeout, or cleanup behavior.
 
 ## Pull requests
 

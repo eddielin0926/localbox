@@ -45,21 +45,21 @@ Create requirements are a discriminated union. Every requirement names its domai
 | --- | --- | --- | --- |
 | `host` | `{ type: "host", selector: "current" }` | `trust: "trusted"`, `mutability: "mutable"` | Process only |
 | `directory` | `{ type: "absolute-path", path }` | explicit trust and mutable/read-only declaration | Modeled; unsupported |
-| `oci-image` | `{ type: "oci-reference", reference }` | nullable sha256/sha512 digest, explicit trust and mutability, nullable Linux/Windows amd64/arm64 platform hint | Docker only |
+| `oci-image` | `{ type: "oci-reference", reference }` | nullable sha256/sha512 digest, explicit trust and mutability, nullable Linux/Windows amd64/arm64 platform hint | Docker and Podman |
 | `disk-image` | `{ type: "absolute-path", path }` | nullable digest, raw/qcow2 format, nullable architecture, explicit trust and mutable/read-only declaration | Modeled; unsupported |
 | `snapshot` | `{ type: "snapshot-id", snapshotId, scope, backend }` | backend-scoped locators require backend identity; portable locators prohibit one; nullable digest and explicit trust/mutability | Modeled; unsupported |
 
 Validation rejects relative paths, empty or NUL-bearing identities, whitespace-bearing OCI references, malformed or uppercase digests, unknown fields or kinds, and immutable OCI/snapshot claims without a digest. These declarations prevent callers and backends from inferring portability, integrity, or immutability from a path, tag, or snapshot ID. They are metadata, not an isolation upgrade: Localbox does not verify an arbitrary caller's trust declaration, a mutable tag can change, and a digest states expected content identity rather than proving registry or publisher trust.
 
-`EmbeddedSandboxClient` validates the artifact and derives a mandatory artifact requirement before name claims or backend calls. If the caller omitted that requirement, the client adds it; if the caller supplied one, it must include the actual kind and cannot be weakened by a duplicate. Docker accepts OCI artifacts, including arbitrary explicit image references, under its documented trusted/single-tenant container boundary. Process accepts only the exact current-host artifact. Directory, disk-image, and snapshot inputs remain representation-only until a future backend advertises and implements them.
+`EmbeddedSandboxClient` validates the artifact and derives a mandatory artifact requirement before name claims or backend calls. If the caller omitted that requirement, the client adds it; if the caller supplied one, it must include the actual kind and cannot be weakened by a duplicate. Docker and Podman accept OCI artifacts, including arbitrary explicit image references, under their documented trusted/single-tenant container boundaries. Process accepts only the exact current-host artifact. Directory, disk-image, and snapshot inputs remain representation-only until a future backend advertises and implements them.
 
 `frontendMetadata` is a narrow provider-owned display record. The current Vercel variant retains the resolved `image` and original nullable `runtime` so the released synchronous getters survive without reintroducing provider selectors as execution input. Backends execute only `bootArtifact`.
 
 ## Backend availability
 
-`SandboxClient.probeAvailability` is a read-only, deadline-aware operation. A successful probe returns schema version `1`, the exact backend identity, `available` or `unavailable`, a millisecond timestamp, and an ordered non-empty diagnostic list. Every diagnostic has a stable code, `info`/`warning`/`error` severity, safe message, actionable remediation, and one typed details object. The embedded client rejects wrong identities, unknown codes, malformed/non-JSON values, inconsistent status/severity, thrown provider values, and late responses; failures use the normal stable envelope. Probe diagnostics deliberately omit environment values, registry credentials, Docker endpoint values, and provider causes.
+`SandboxClient.probeAvailability` is a read-only, deadline-aware operation. A successful probe returns schema version `1`, the exact backend identity, `available` or `unavailable`, a millisecond timestamp, and an ordered non-empty diagnostic list. Every diagnostic has a stable code, `info`/`warning`/`error` severity, safe message, actionable remediation, and one typed details object. The embedded client rejects wrong identities, unknown codes, malformed/non-JSON values, inconsistent status/severity, thrown provider values, and late responses; failures use the normal stable envelope. Probe diagnostics deliberately omit environment values, registry credentials, container-engine endpoint values, and provider causes.
 
-Probing never creates a sandbox, directory, container, image pull, or prerequisite installation. Docker calls only the daemon version API and distinguishes a missing endpoint, endpoint permission denial, and an otherwise unreachable daemon with context/socket remediation. Process checks POSIX support, the configured absolute non-symlink root or nearest existing parent, read/write/execute access, the current Node executable, and the bundled supervisor program. It does not create the configured root during the probe.
+Probing never creates a sandbox, directory, container, image pull, or prerequisite installation. Docker calls only the daemon version API and distinguishes a missing endpoint, endpoint permission denial, and an otherwise unreachable daemon with context/socket remediation. Podman calls only the Docker-compatible version and information APIs, verifies the endpoint identifies Podman, detects its actual rootless/rootful mode, and fails availability if that mode differs from the backend's immutable capability contract. Process checks POSIX support, the configured absolute non-symlink root or nearest existing parent, read/write/execute access, the current Node executable, and the bundled supervisor program. It does not create the configured root during the probe.
 
 ## Current operation surface
 
@@ -127,13 +127,44 @@ Host-style backends may implement the internal `filesystemWorkspace(sandboxId)` 
 
 ## Docker backend ownership and security boundary
 
-`DockerBackend` is the only Docker execution boundary. It owns Dockerode construction and values, validated OCI artifacts and labels, container creation and inspection, persistence and resource settings, network and published-port inspection, watchdog deadlines, source materialization, raw exec creation, bounded stdin attachment, stream demultiplexing, exit inspection, raw signal delivery, cleanup, availability probing, and Docker failure translation. Vercel runtime/image alias conversion belongs to the frontend. Docker does not contain filesystem operation scripts or semantic filesystem APIs. Docker exec IDs, streams, containers, and inspect values remain private. The backend does not allocate neutral process IDs or retain replay output, cursors, followers, waiters, or frontend callbacks.
+`DockerBackend` is the Docker-specific driver over the shared container-engine execution layer. The driver owns Dockerode construction, stable Docker identity, Docker capability text, availability diagnostics, and Docker failure codes. The shared layer owns validated OCI artifacts and labels, container creation and inspection, persistence and resource settings, network and published-port inspection, watchdog deadlines, source materialization, raw exec creation, bounded stdin attachment, stream demultiplexing, exit inspection, raw signal delivery, and cleanup. Vercel runtime/image alias conversion belongs to the frontend. Container-engine code does not contain filesystem operation scripts or semantic filesystem APIs. Engine exec IDs, streams, containers, and inspect values remain private. The backend does not allocate neutral process IDs or retain replay output, cursors, followers, waits, signal idempotency, or semantic filesystem state.
 
 Docker is a shared-kernel container backend for trusted or single-tenant local development, not a hostile multi-tenant security boundary. Its isolation is `partial` at `shared-kernel-container`; commands are native while detached lifecycle and filesystem semantics are emulated by the embedded runtime; managed ownership is partial and restricted to Localbox images. Docker accepts only OCI boot artifacts. Arbitrary explicit OCI references remain runnable for compatibility, but an artifact `trust` value is provenance metadata and never strengthens Docker isolation or authorizes managed-root behavior. Git and tarball remain post-boot workspace sources, not boot-artifact kinds. Host, directory, disk-image, and snapshot artifacts are rejected before Docker allocation.
 
 Networking is partial: bridge `allow-all` and network-none `deny-all` are available, published HTTP ports are loopback-only, and custom policies are unsupported. A deny-all sandbox with a Git or tarball source has network access during source materialization and is disconnected afterward. Resources are partial: Docker hard-enforces integer NanoCPU quotas and memory at exactly 2 GiB per vCPU, with no independent memory setting or host-capacity guarantee. Interactive PTYs and snapshot operations are explicitly unsupported. Docker does not provide path containment for host directories, VM isolation, portable snapshot guarantees, remote upload/storage, or registry provenance verification.
 
 The default Docker composition lives in `src/default-client.ts` and accepts an explicit absolute state-root override while otherwise following XDG resolution. The Vercel compatibility frontend receives a generic `SandboxClient` factory and retains only the client plus neutral records and IDs. Its create requests require the operational command/filesystem surface, selected source and endpoint operations, accepted artifact kinds, requested persistence, selected network policy, and requested resource values. It accepts native, emulated, or partial implementations because those classifications preserve the released local v0.3 behavior; unsupported snapshot, mount, retention, and custom cloud/network options continue to fail before client allocation.
+
+## Podman container-engine backend
+
+`PodmanBackend` uses the shared container-engine lifecycle, OCI image, exec-stream, source, port, persistence, watchdog, label recovery, and cleanup implementation where Podman's Docker-compatible API has matching semantics. Construction remains explicit and instance-bound:
+
+```ts
+import { EmbeddedSandboxClient, PodmanBackend } from "localbox/runtime";
+
+const backend = new PodmanBackend({
+  mode: "rootless",
+  // Optional for the standard per-user socket.
+  socketPath: "/run/user/1000/podman/podman.sock",
+});
+const client = new EmbeddedSandboxClient(backend, {
+  stateRoot: "/absolute/private/localbox-runtime-state",
+});
+```
+
+`mode` defaults to `rootless` and selects both a stable backend identity and one immutable capability document. The default rootless endpoint is `$XDG_RUNTIME_DIR/podman/podman.sock`, falling back to `/run/user/<uid>/podman/podman.sock`; rootful defaults to `/run/podman/podman.sock`. A custom endpoint must be an absolute Unix socket path. There is no Docker-context or Podman-connection-shell fallback and no automatic switch between modes.
+
+| Capability | Rootless Podman | Rootful Podman |
+| --- | --- | --- |
+| OCI lifecycle, exec, files, sources, ports, persistence, cleanup | Supported through the shared engine path | Supported through the shared engine path |
+| Isolation/service authority | Container root maps into the invoking user's namespace; shared host kernel | Service has host-root authority; shared host kernel |
+| CPU and memory request | Unsupported and rejected before allocation because cgroup delegation varies by host/session | Partial hard enforcement: integer vCPU quota and fixed 2 GiB memory per vCPU |
+| `allow-all` / `deny-all` | Connected engine network or network-none; source-backed creation disconnects every attached network after materialization | Same |
+| Recovery | Sandbox containers and writable layers only; in-flight process state is not recoverable | Same |
+
+Rootless is a reduction in service privilege, not a stronger advertised tenancy class: commands still share the host kernel and operate with the invoking account's effective storage/network authority through Podman. Rootful mode makes anyone with access to its API socket effectively host-root. Neither mode is safe for hostile multi-tenant workloads. Localbox sets `no-new-privileges`, publishes requested ports only on `127.0.0.1`, does not mount the API socket into containers, and exposes no privileged-container option. Operators must protect the socket, engine storage, registry credentials, and Localbox state root.
+
+Podman-specific preflight verifies both the engine identity and configured mode before the first allocation. Rootless resource requests fail explicitly rather than being accepted as portable container-engine guarantees. Interactive terminals, snapshots, drive mounts, custom network policies, non-loopback endpoints, registry trust verification, cgroup portability across hosts, and remote Podman services are unsupported. Git/tarball materialization for a `deny-all` sandbox necessarily has network access until source setup completes; Localbox then enumerates and disconnects every attached engine network instead of assuming Docker's `bridge` network name.
 
 ## Trusted host process backend
 
@@ -216,7 +247,8 @@ The mount graph intentionally provides Linux namespace/filesystem isolation, not
 
 - `ProcessBackend`: trusted host process bookkeeping, **no isolation boundary**.
 - `BwrapBackend`: Linux user/PID/IPC/UTS/mount and optional network namespace isolation with a narrow filesystem, sharing the host kernel.
-- `DockerBackend`: a container boundary with image/rootfs, cgroup, network, and port mechanisms, also sharing the host kernel.
+- `DockerBackend`: a root-authority container boundary with image/rootfs, cgroup, network, and port mechanisms, sharing the host kernel.
+- `PodmanBackend`: the same shared-kernel container mechanisms; rootless mode maps service/container root into the invoking user's namespaces, while rootful mode has host-root service authority.
 - None of these is a microVM or a suitable hostile multi-tenant isolation boundary. Use a hardened VM/microVM runtime for adversarial multi-tenancy.
 
 The argument contract follows the upstream Bubblewrap README and the Debian bookworm `bwrap(1)` manual for bubblewrap 0.8.0, including ordered filesystem operations, unprivileged user namespaces, explicit network sharing, PID reaping, `--new-session`, and `--die-with-parent`. Other distribution versions are accepted only when `--version` and the actual namespace probes pass.
@@ -227,7 +259,7 @@ Every operational capability key must map to at least one observable behavior pr
 
 A profile declares typed requirements and runs only when negotiation confirms the backend's advertised support class and constraints satisfy them. Precisely unsupported operations or domain constraints are capability-only skips; malformed advertisements, unknown or missing keys, and unprofiled capability keys fail the coverage profile. Each case owns uniquely named resources and invokes harness cleanup from a `finally` path, so profiles are parallel- and full-suite-safe.
 
-To register a future backend, publish all schema v1 keys even when unsupported, choose support classifications before constraints, state the security boundary in each diagnostic, and use the narrowest honest bounds. Add or update an observable profile whenever adding an operational key, and reject an unknown requirement discriminant rather than guessing its meaning. Construct the backend behind its normal `SandboxClient` boundary, provide real source fixtures for supported source operations, and call `registerBackendConformanceProfiles`. Backend-specific mechanism tests may remain beside the registration, but reusable contract expectations belong in the profiles. Docker registers through `EmbeddedSandboxClient` in `test/integration/docker-conformance.test.ts`; Process registers without Docker in `test/process/process-conformance.test.ts`.
+To register a future backend, publish all schema v1 keys even when unsupported, choose support classifications before constraints, state the security boundary in each diagnostic, and use the narrowest honest bounds. Add or update an observable profile whenever adding an operational key, and reject an unknown requirement discriminant rather than guessing its meaning. Construct the backend behind its normal `SandboxClient` boundary, provide real source fixtures for supported source operations, and call `registerBackendConformanceProfiles`. Backend-specific mechanism tests may remain beside the registration, but reusable contract expectations belong in the profiles. Docker and configured Podman services register through `EmbeddedSandboxClient` in `test/integration/docker-conformance.test.ts` and `test/integration/podman-conformance.test.ts`; process and Bubblewrap use the same profile from their backend-specific suites.
 
 ## Error boundary
 
@@ -235,4 +267,4 @@ Valid contract failures returned by a backend retain their category, code, messa
 
 ## Intentional non-goals
 
-This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote artifact upload/storage, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, automatic prerequisite installation, or additional provider APIs. Directory/disk/snapshot execution, Podman, seccomp policy compilation, cgroup resource enforcement, terminals, microVMs, and a remote service or control plane remain deferred. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
+This layer does not provide a transport server, RPC protocol, durable command output or idempotency state, distributed leases, remote artifact upload/storage, remote/shared-filesystem coordination, dynamic backend discovery, reconnection, a new public stream API, transport-level cancellation, automatic prerequisite installation, or additional provider APIs. Directory/disk/snapshot execution, remote Podman services, seccomp policy compilation, portable cgroup enforcement, terminals, microVMs, and a remote service or control plane remain deferred. Backend selection remains explicit and instance-bound rather than global or mutable. This work does not change the development interception rules in [INTERCEPTION.md](./INTERCEPTION.md).
