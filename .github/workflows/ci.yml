@@ -192,14 +192,67 @@ jobs:
       - name: Diagnose rootful Podman networking
         if: ${{ failure() && matrix.mode == 'rootful' }}
         run: |
+          diagnostic_image="ghcr.io/eddielin0926/localbox-vercel:node-24-b99895b79dd346905166efd83bd86e73a9762c2e"
+          diagnostic_container="localbox-rootful-network-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup_diagnostic_container() {
+            sudo podman rm --force "$diagnostic_container" >/dev/null 2>&1 || true
+          }
+          trap cleanup_diagnostic_container EXIT
+
           dpkg-query --show podman netavark aardvark-dns || true
           sudo podman info --debug || true
+          sudo podman run --detach --name "$diagnostic_container" --network podman --pull=never \
+            "$diagnostic_image" sleep infinity >/dev/null || true
+
+          printf '%s\n' '=== diagnostic container resolver ==='
+          sudo podman exec "$diagnostic_container" cat /etc/resolv.conf || true
+          printf '%s\n' '=== diagnostic container network settings ==='
+          sudo podman inspect --format '{{json .NetworkSettings}}' "$diagnostic_container" || true
+          printf '%s\n' '=== diagnostic container routes ==='
+          sudo podman exec "$diagnostic_container" sh -c '
+            if command -v ip >/dev/null 2>&1; then
+              ip -details route show table all
+              ip -6 -details route show table all
+            else
+              cat /proc/net/route
+              cat /proc/net/ipv6_route
+            fi
+          ' || true
+          printf '%s\n' '=== diagnostic container github.com lookup ==='
+          sudo podman exec "$diagnostic_container" sh -c '
+            if command -v getent >/dev/null 2>&1; then
+              getent ahosts github.com
+            else
+              node -e "require(\"node:dns\").lookup(\"github.com\", { all: true }, (error, addresses) => { if (error) { console.error(error.message); process.exitCode = 1; } else { console.log(addresses); } })"
+            fi
+          ' || true
+
+          printf '%s\n' '=== rootful default Podman network ==='
           sudo podman network inspect podman || true
-          sudo ss --listening --numeric --udp --processes || true
-          cat /etc/resolv.conf || true
-          sudo iptables-save || true
-          sudo nft list ruleset || true
-          cat "$RUNNER_TEMP/podman-rootful.log" || true
+          printf '%s\n' '=== rootful UDP listeners ==='
+          sudo ss --listening --numeric --udp --processes | sed -n '1,200p' || true
+          printf '%s\n' '=== iptables Netavark/NAT/forward counters ==='
+          if command -v iptables-save >/dev/null 2>&1; then
+            sudo iptables-save --counters 2>/dev/null \
+              | grep -E '(^\*|^:|NETAVARK|netavark|podman|FORWARD|PREROUTING|POSTROUTING|MASQUERADE|COMMIT)' \
+              | sed -n '1,400p' || true
+          else
+            printf '%s\n' 'iptables-save unavailable'
+          fi
+          printf '%s\n' '=== nftables Netavark/NAT/forward counters ==='
+          if command -v nft >/dev/null 2>&1; then
+            sudo nft --handle list ruleset 2>/dev/null \
+              | grep -Ei -C 3 'netavark|podman|dns|forward|prerouting|postrouting|masquerade|counter' \
+              | sed -n '1,400p' || true
+          else
+            printf '%s\n' 'nft unavailable'
+          fi
+          printf '%s\n' '=== rootful Podman service log (last 500 lines, sensitive fields filtered) ==='
+          tail --lines=500 "$RUNNER_TEMP/podman-rootful.log" \
+            | sed -E \
+              -e '/Authorization|Cookie|X-Registry-Auth|"Env"[[:space:]]*:/Id' \
+              -e 's#https?://[^[:space:]"]+#[redacted-url]#g' \
+              -e 's#\?[^[:space:]"]+#?[redacted-query]#g' || true
 
   integration:
     name: Docker integration
