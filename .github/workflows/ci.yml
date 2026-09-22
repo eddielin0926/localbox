@@ -189,6 +189,18 @@ jobs:
       - name: Run Podman availability and conformance tests
         run: pnpm test:podman
 
+      - name: Diagnose rootful Podman networking
+        if: ${{ failure() && matrix.mode == 'rootful' }}
+        run: |
+          dpkg-query --show podman netavark aardvark-dns || true
+          sudo podman info --debug || true
+          sudo podman network inspect podman || true
+          sudo ss --listening --numeric --udp --processes || true
+          cat /etc/resolv.conf || true
+          sudo iptables-save || true
+          sudo nft list ruleset || true
+          cat "$RUNNER_TEMP/podman-rootful.log" || true
+
   integration:
     name: Docker integration
     needs: validate

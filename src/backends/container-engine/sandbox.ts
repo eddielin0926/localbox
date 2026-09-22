@@ -1081,6 +1081,9 @@ export class Sandbox {
       ...(options.user === undefined ? {} : { user: options.user }),
       ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.execSessionNotFound === undefined
+        ? {}
+        : { execSessionNotFound: options.execSessionNotFound }),
     });
   }
 

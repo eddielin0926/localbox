@@ -2,12 +2,17 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import type Dockerode from "dockerode";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   PodmanBackend,
   type PodmanMode,
 } from "../../src/backends/podman/index.js";
 import { containerEngineContainerName } from "../../src/backends/container-engine/sandbox.js";
+import { startRawCommand } from "../../src/backends/container-engine/command.js";
+import { dockerStatus } from "../../src/backends/container-engine/docker.js";
+import type { RawCommandEvent } from "../../src/runtime/index.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -288,5 +293,90 @@ describe("PodmanBackend", () => {
         backend: { backendId: "local-podman-rootless", backendType: "podman" },
       },
     });
+  });
+  test("rootful commands complete from their recorded status when Podman discards the exec session", async () => {
+    const commandStream = new PassThrough();
+    const statusStream = new PassThrough();
+    const missing = Object.assign(new Error("exec record unavailable"), { statusCode: 404 });
+    const commandExec = {
+      start: () => Promise.resolve(commandStream),
+      inspect: () => Promise.reject(missing),
+    } as unknown as Dockerode.Exec;
+    const statusExec = {
+      start: () => {
+        setImmediate(() => statusStream.end("143"));
+        return Promise.resolve(statusStream);
+      },
+      inspect: () => Promise.resolve({ Running: false, ExitCode: 0 }),
+    } as unknown as Dockerode.Exec;
+    let execCreations = 0;
+    const container = {
+      exec: () => Promise.resolve(execCreations++ === 0 ? commandExec : statusExec),
+    } as unknown as Dockerode.Container;
+    const docker = {
+      modem: {
+        demuxStream(
+          source: NodeJS.ReadableStream,
+          stdout: NodeJS.WritableStream,
+          _stderr: NodeJS.WritableStream,
+        ) {
+          source.pipe(stdout);
+        },
+      },
+    } as unknown as Dockerode;
+    const command = await startRawCommand(docker, container, {
+      cmd: ["node", "-e", "process.exit(143)"],
+      cwd: "/vercel/sandbox",
+      env: [],
+      execSessionNotFound: (error) => dockerStatus(error) === 404,
+    });
+
+    await expect(command.signal("SIGTERM")).resolves.toBeUndefined();
+
+    commandStream.end("ready");
+    const events: RawCommandEvent[] = [];
+    for await (const event of command.events) events.push(event);
+
+    expect(events).toMatchObject([
+      { type: "stdout", data: "ready" },
+      { type: "complete", exitCode: 143 },
+    ]);
+    expect(events).toHaveLength(2);
+    expect(execCreations).toBe(2);
+  });
+
+  test("does not treat an unrecognized exec inspect 404 as command completion", async () => {
+    const commandStream = new PassThrough();
+    const missing = Object.assign(new Error("request not found"), { statusCode: 404 });
+    const commandExec = {
+      start: () => Promise.resolve(commandStream),
+      inspect: () => Promise.reject(missing),
+    } as unknown as Dockerode.Exec;
+    const container = {
+      exec: () => Promise.resolve(commandExec),
+    } as unknown as Dockerode.Container;
+    const docker = {
+      modem: {
+        demuxStream(
+          source: NodeJS.ReadableStream,
+          stdout: NodeJS.WritableStream,
+          _stderr: NodeJS.WritableStream,
+        ) {
+          source.pipe(stdout);
+        },
+      },
+    } as unknown as Dockerode;
+    const command = await startRawCommand(docker, container, {
+      cmd: ["node", "-e", "process.exit(1)"],
+      cwd: "/vercel/sandbox",
+      env: [],
+    });
+
+    commandStream.end();
+    const events: RawCommandEvent[] = [];
+    for await (const event of command.events) events.push(event);
+
+    expect(events).toMatchObject([{ type: "backend-failure" }]);
+    expect(events).toHaveLength(1);
   });
 });

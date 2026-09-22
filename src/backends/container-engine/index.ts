@@ -179,6 +179,7 @@ export interface ContainerEngineDriver {
   readonly unavailableMessage: string;
   readonly failureCode: string;
   readonly ephemeralStopStrategy?: "stop-then-remove" | "remove";
+  readonly execSessionNotFound?: (error: unknown) => boolean;
   probeAvailability(
     request: ProbeAvailabilityRequest,
   ): Promise<ClientResult<ProbeAvailabilityResult>>;
@@ -698,6 +699,9 @@ export class ContainerEngineBackend implements SandboxBackend {
           : { user: request.command.user }),
         ...(input === undefined ? {} : { stdin: input }),
         ...(signal === undefined ? {} : { signal }),
+        ...(this.#driver.execSessionNotFound === undefined
+          ? {}
+          : { execSessionNotFound: this.#driver.execSessionNotFound }),
       });
       return { ok: true, command };
     } catch (error) {

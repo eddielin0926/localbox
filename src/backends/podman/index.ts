@@ -6,6 +6,7 @@ import {
   type ContainerEngineDriver,
 } from "../container-engine/index.js";
 import { DockerUnavailableError, UnsupportedSandboxCapabilityError } from "../container-engine/errors.js";
+import { dockerStatus } from "../container-engine/docker.js";
 import type {
   AvailabilityDiagnostic,
   BackendAvailability,
@@ -125,6 +126,11 @@ interface PodmanServiceIdentity {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isMissingPodmanExecSession(error: unknown): boolean {
+  // The caller invokes this only for inspection of its already-started exec.
+  return dockerStatus(error) === 404;
 }
 
 function isPodmanVersion(value: unknown): boolean {
@@ -321,6 +327,9 @@ export class PodmanBackend extends ContainerEngineBackend {
       unavailableMessage: "Cannot connect to Podman. Start the matching API service and retry.",
       failureCode: "LOCALBOX_PODMAN_FAILURE",
       ephemeralStopStrategy: "remove",
+      ...(mode === "rootful"
+        ? { execSessionNotFound: isMissingPodmanExecSession }
+        : {}),
       probeAvailability: (request) =>
         probePodmanAvailability(client, reference, mode, request),
       async beforeOperation(signal) {
