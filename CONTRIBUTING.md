@@ -25,11 +25,19 @@ Create a focused branch from the current `main` branch. Keep unrelated changes i
 
 ## Making changes
 
-- Preserve the supported behavior documented in [`src/vercel/compatibility.json`](src/vercel/compatibility.json).
-- Update the compatibility manifest and README when public behavior changes.
+- Preserve the supported behavior documented in [`src/frontend/manifests`](src/frontend/manifests).
+- Update the provider manifest and user documentation when public behavior changes.
 - Add or update tests for observable behavior, boundaries, state transitions, or regressions.
 - Avoid tests that only assert implementation details.
 - Keep error messages actionable and avoid writing unsolicited output to process streams.
+
+### Frontend conventions
+
+Each provider owns one data-only schema-v1 manifest in `src/frontend/manifests`. Do not add a provider-specific reporter or a second schema. Record the exact upstream package, pinned version, documentation URL, assessment date, public surfaces, support classification, type/behavior compatibility, and declaration drift configuration. Use only `native`, `emulated`, `partial`, `not-applicable`, or `unsupported`, and provide a concrete rationale for every non-native entry. `not-applicable` is limited to cloud-only concerns with no local semantic effect; requested behavior Localbox cannot preserve is `unsupported`.
+
+Provider adapters expose their provider-specific package entry point but compose through `localbox/frontend` with an explicit public `SandboxClient` or factory. They must not import a backend, choose a backend globally, or move default embedded composition into adapter code. Translate and validate provider requests before resolving the client; unsupported security, isolation, network, resource, storage, snapshot, session, terminal, and hosted control-plane options must fail before sandbox creation. Explicitly report genuinely not-applicable inputs. Never silently ignore an option.
+
+Frontend behavior suites reuse the discriminated shell/argv and completion/live-process contracts. Test those four semantics independently, along with option preflight, provider result/error translation, and meaningful differences recorded in the manifest. Keep package exports, published files, the all-frontend report script, README, and runtime documentation in sync when adding a frontend.
 
 ## Verification
 
@@ -43,7 +51,8 @@ Run the smallest checks that cover your change:
 | `pnpm test:integration` | Exercise default sandbox behavior against Docker; Podman conformance is skipped unless configured. | Docker |
 | `LOCALBOX_PODMAN_SOCKET=/absolute/podman.sock LOCALBOX_PODMAN_MODE=rootless pnpm test:podman` | Exercise Podman availability and applicable backend conformance profiles. Use `rootful` for a rootful service. | Podman |
 | `pnpm smoke` | Run the end-to-end default example after building. | Docker |
-| `pnpm compatibility:vercel` | Print the current Vercel compatibility report. | No |
+| `pnpm compatibility` | Validate every frontend manifest and render reports in stable order; add `-- --json` for JSON. | No |
+| `pnpm compatibility:vercel` | Validate and render only the Vercel report. | No |
 
 For most changes, run type checking, unit tests, and the build. Run the applicable Docker and/or Podman integration checks when changing container-engine lifecycle, command, filesystem, port, persistence, timeout, or cleanup behavior.
 

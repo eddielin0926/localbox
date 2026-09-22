@@ -56,8 +56,8 @@ jobs:
       - name: Test packed package installation
         run: pnpm smoke:package
 
-      - name: Render compatibility report
-        run: pnpm compatibility:vercel
+      - name: Validate and render all frontend compatibility reports
+        run: pnpm compatibility
 
   process:
     name: Process backend conformance

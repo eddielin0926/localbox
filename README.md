@@ -128,6 +128,24 @@ Framework adapters, when a proven bypass requires one, are optional toolchain in
 
 Application code continues to use `localbox/vercel` exactly as it did in v0.2. The runtime package exports the transport-safe `SandboxClient` contract, `EmbeddedSandboxClient`, backend interface, `DockerBackend`, `PodmanBackend`, and opt-in `ProcessBackend` and `BwrapBackend`. The default application composition remains an embedded client bound to one Docker backend. Vercel runtime/image selectors are resolved by the frontend to one OCI boot artifact before that boundary; they are never backend fallback instructions. See [RUNTIME.md](RUNTIME.md) for the artifact schema, availability diagnostics, state migration, command/filesystem ownership, capability-driven conformance profiles, and construction details.
 
+### Frontend adapter framework
+
+`localbox/frontend` is the provider-neutral composition contract for compatibility adapters. An adapter is bound to an explicitly supplied public `SandboxClient` or `SandboxClientFactory`; the shared layer has no Docker, Podman, process, Bubblewrap, backend-registry, or mutable global selection API. Provider code synchronously validates and translates a request before the factory is resolved, invokes `SandboxClient`, then translates its plain result or error into provider-owned values. The existing `localbox/vercel` entry point and its default Docker behavior are unchanged.
+
+Command contracts keep four shapes explicit: shell strings, direct executable/argument vectors, completed results, and live process handles. A shell string is never silently converted to argv semantics, and a started process is never represented as an already completed result.
+
+Compatibility manifests use schema version 1 and exactly these frontend support classifications:
+
+| Classification | Meaning | Counted as supported |
+| --- | --- | --- |
+| `native` | The adapter provides the upstream behavior directly through the client contract. | Yes |
+| `emulated` | The adapter composes client operations while preserving the observable upstream behavior. | Yes |
+| `partial` | Only the stated subset or constraints are guaranteed. | Yes, as partial |
+| `not-applicable` | A hosted control-plane concern has no local semantic effect. | No |
+| `unsupported` | The caller requested observable behavior Localbox cannot honor. | No |
+
+Every non-native entry requires a rationale. Security, isolation, network, resource, storage, snapshot, session, terminal, and hosted control-plane inputs must be classified centrally: unsupported behavior is rejected before client allocation, while not-applicable cloud-only input is explicitly reported rather than counted as support. No provider option may be silently ignored.
+
 ### Podman runtime backend
 
 `PodmanBackend` is an explicit neutral-runtime backend; it does not silently replace the Docker-backed `localbox/vercel` default:
@@ -249,13 +267,14 @@ Paths are relative to `/vercel/sandbox` unless absolute. Methods accept an `Abor
 
 Vercel Sandbox is Localbox's current compatibility target. The pending Localbox v0.4.0 release candidate supports direct `localbox/vercel` imports and explicit development interception for the unchanged `@vercel/sandbox` import while routing the frontend through the neutral runtime.
 
-Compatibility is checked against `@vercel/sandbox@3.3.0`. The versioned [`compatibility.json`](src/vercel/compatibility.json) records each assessed method, its type compatibility, behavioral differences, and unsupported APIs. Run the report locally with:
+Compatibility is checked against `@vercel/sandbox@3.3.0`. The schema-v1 [`vercel.json`](src/frontend/manifests/vercel.json) data manifest records the exact upstream package, version, documentation URL, assessment date, public methods, support classifications, type/behavior compatibility, rationales, and declaration drift hooks. The shared reporter validates every manifest and renders all frontends in stable name order:
 
 ```sh
-pnpm compatibility:vercel
+pnpm compatibility
+pnpm compatibility -- --json
 ```
 
-The complete documented `Command` and `FileSystem` method sets in that manifest are implemented. The supported `Sandbox` subset covers local lifecycle, commands, files, ports, timeouts, create-time resource limits, source materialization, tags, placement metadata, and allow-all or deny-all networking. Cloud control-plane features such as snapshots, forks, sessions, users and groups, interactive terminals, resource updates, drive mounts, and custom network-policy rules are not implemented.
+Select only the Vercel report, in text or JSON, with `pnpm compatibility:vercel` or `pnpm compatibility:vercel -- --json`. When an assessed upstream package is installed, reporting also verifies its exact version and compares the configured public declaration surfaces. The complete documented `Command` and `FileSystem` method sets in that manifest are implemented. The supported `Sandbox` subset covers local lifecycle, commands, files, ports, timeouts, create-time resource limits, source materialization, tags, placement metadata, and allow-all or deny-all networking. Cloud control-plane features such as snapshots, forks, sessions, users and groups, interactive terminals, resource updates, drive mounts, and custom network-policy rules are not implemented.
 
 ### Differences from Vercel Sandbox
 
@@ -329,7 +348,7 @@ pnpm test:integration
 LOCALBOX_PODMAN_SOCKET=/absolute/podman.sock LOCALBOX_PODMAN_MODE=rootless pnpm test:podman
 pnpm smoke
 pnpm smoke:interception
-pnpm compatibility:vercel
+pnpm compatibility
 ```
 
 ## Community

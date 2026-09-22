@@ -38,6 +38,10 @@
       "types": "./dist/vercel/index.d.ts",
       "import": "./dist/vercel/index.js"
     },
+    "./frontend": {
+      "types": "./dist/frontend/index.d.ts",
+      "import": "./dist/frontend/index.js"
+    },
     "./runtime": {
       "types": "./dist/runtime/index.d.ts",
       "import": "./dist/runtime/index.js"
@@ -52,7 +56,9 @@
     "images/vercel",
     "README.md",
     "RUNTIME.md",
-    "src/vercel/compatibility.json",
+    "src/frontend/compatibility-manifest.schema.json",
+    "src/frontend/manifests",
+    "scripts/compatibility-report.mjs",
     "scripts/report-compatibility.mjs"
   ],
   "sideEffects": false,
@@ -75,7 +81,8 @@
     "smoke:process": "node scripts/smoke-process-backend.mjs",
     "smoke:bwrap": "node scripts/smoke-bwrap-backend.mjs",
     "smoke:package": "node scripts/smoke-packed-install.mjs",
-    "compatibility:vercel": "node scripts/report-compatibility.mjs"
+    "compatibility": "node scripts/report-compatibility.mjs --all",
+    "compatibility:vercel": "node scripts/report-compatibility.mjs --frontend vercel"
   },
   "dependencies": {
     "dockerode": "5.0.1"
