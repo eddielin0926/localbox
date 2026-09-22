@@ -800,9 +800,23 @@ export type BackendErrorDetails = JsonObject & {
   readonly operation: string;
 };
 
+export type SourceErrorStage =
+  | "inspect-container"
+  | "clear-workspace"
+  | "prepare-authentication"
+  | "clone"
+  | "initialize"
+  | "configure-remote"
+  | "fetch"
+  | "checkout"
+  | "extract";
+
 export type SourceErrorDetails = JsonObject & {
   readonly type: "source";
   readonly sourceType: "git" | "tarball";
+  readonly stage?: SourceErrorStage;
+  readonly exitCode?: number | null;
+  readonly diagnostic?: string | null;
 };
 
 export type FileErrorDetails = JsonObject & {

@@ -1,3 +1,33 @@
+import type { SourceErrorStage } from "../../runtime/index.js";
+
+const SOURCE_DIAGNOSTIC_LIMIT = 2_048;
+
+function sourceDiagnostic(cause: unknown, redactions: readonly string[]): string | null {
+  const message = cause instanceof Error
+    ? cause.message
+    : typeof cause === "string"
+    ? cause
+    : null;
+  if (message === null) return null;
+
+  let diagnostic = message;
+  for (const value of redactions) {
+    if (value.length === 0) continue;
+    diagnostic = diagnostic.replaceAll(value, "[redacted]");
+    const encoded = encodeURIComponent(value);
+    if (encoded !== value) diagnostic = diagnostic.replaceAll(encoded, "[redacted]");
+  }
+  diagnostic = diagnostic
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/giu, "$1[redacted]@")
+    .replace(/([?&](?:access_token|auth|key|password|secret|token)=)[^&#\s]*/giu, "$1[redacted]")
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (diagnostic.length === 0) return null;
+  if (diagnostic.length <= SOURCE_DIAGNOSTIC_LIMIT) return diagnostic;
+  return `${diagnostic.slice(0, SOURCE_DIAGNOSTIC_LIMIT - 1)}…`;
+}
+
 export class DockerBackendError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -69,12 +99,32 @@ export class UnsupportedSandboxCapabilityError extends DockerBackendError {
   }
 }
 
+export interface SandboxSourceErrorOptions {
+  readonly exitCode?: number;
+  readonly redactions?: readonly string[];
+}
+
 export class SandboxSourceError extends DockerBackendError {
   readonly sourceType: "git" | "tarball";
+  readonly stage: SourceErrorStage;
+  readonly exitCode: number | null;
+  readonly diagnostic: string | null;
 
-  constructor(sourceType: "git" | "tarball", cause?: unknown) {
-    super(`Could not materialize the ${sourceType} sandbox source.`, { cause });
+  constructor(
+    sourceType: "git" | "tarball",
+    stage: SourceErrorStage,
+    cause?: unknown,
+    options: SandboxSourceErrorOptions = {},
+  ) {
+    const exitCode = options.exitCode ?? null;
+    const diagnostic = sourceDiagnostic(cause, options.redactions ?? []);
+    const exit = exitCode === null ? "" : ` (exit code ${exitCode})`;
+    const detail = diagnostic === null ? "." : `: ${diagnostic}`;
+    super(`Could not materialize the ${sourceType} sandbox source during ${stage}${exit}${detail}`, { cause });
     this.sourceType = sourceType;
+    this.stage = stage;
+    this.exitCode = exitCode;
+    this.diagnostic = diagnostic;
   }
 }
 

@@ -56,6 +56,7 @@ import type {
   SandboxBackend,
   SandboxClient,
   SandboxErrorDetails,
+  SourceErrorStage,
   SandboxCapabilities,
   SandboxRecord,
   SandboxRequirement,
@@ -95,6 +96,17 @@ const ERROR_DETAIL_TYPES: Record<SandboxErrorDetails["type"], true> = {
   source: true,
   file: true,
   none: true,
+};
+const SOURCE_ERROR_STAGES: Record<SourceErrorStage, true> = {
+  "inspect-container": true,
+  "clear-workspace": true,
+  "prepare-authentication": true,
+  clone: true,
+  initialize: true,
+  "configure-remote": true,
+  fetch: true,
+  checkout: true,
+  extract: true,
 };
 const REQUIREMENT_ISSUE_KINDS: Record<SandboxRequirementIssue["kind"], true> = {
   malformed: true,
@@ -416,7 +428,18 @@ function isErrorDetails(value: unknown): value is SandboxErrorDetails {
     case "backend":
       return typeof value.operation === "string";
     case "source":
-      return value.sourceType === "git" || value.sourceType === "tarball";
+      return (
+        (value.sourceType === "git" || value.sourceType === "tarball") &&
+        (value.stage === undefined ||
+          typeof value.stage === "string" &&
+          Object.hasOwn(SOURCE_ERROR_STAGES, value.stage)) &&
+        (value.exitCode === undefined ||
+          value.exitCode === null ||
+          Number.isSafeInteger(value.exitCode)) &&
+        (value.diagnostic === undefined ||
+          value.diagnostic === null ||
+          typeof value.diagnostic === "string")
+      );
     case "file":
       return (
         (value.code === null || typeof value.code === "string") &&

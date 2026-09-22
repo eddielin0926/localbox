@@ -7,6 +7,7 @@ import { validateBootArtifact } from "../../runtime/artifacts.js";
 import type {
   OciImageBootArtifact,
   RawCommand,
+  SourceErrorStage,
 } from "../../runtime/index.js";
 import { startRawCommand, type StartRawCommandOptions } from "./command.js";
 import {
@@ -338,6 +339,8 @@ async function runSourceCommand(
   container: Dockerode.Container,
   sourceType: "git" | "tarball",
   options: {
+    stage: SourceErrorStage;
+    redactions: readonly string[];
     cmd: string[];
     env?: string[];
     stdin?: Buffer;
@@ -348,11 +351,18 @@ async function runSourceCommand(
   try {
     const result = await rawExec(docker, container, options);
     if (result.exitCode !== 0) {
-      throw new Error(result.stderr.toString("utf8").trim() || `Source command exited with ${result.exitCode}.`);
+      const stderr = result.stderr.toString("utf8").trim();
+      const cause = new Error(stderr || `Source command exited with ${result.exitCode}.`);
+      throw new SandboxSourceError(sourceType, options.stage, cause, {
+        exitCode: result.exitCode,
+        redactions: options.redactions,
+      });
     }
   } catch (error) {
     if (error instanceof SandboxSourceError) throw error;
-    throw new SandboxSourceError(sourceType, error);
+    throw new SandboxSourceError(sourceType, options.stage, error, {
+      redactions: options.redactions,
+    });
   }
 }
 
@@ -361,9 +371,12 @@ async function clearWorkspace(
   container: Dockerode.Container,
   sourceType: "git" | "tarball",
   user: string | undefined,
+  redactions: readonly string[],
   signal?: AbortSignal,
 ): Promise<void> {
   await runSourceCommand(docker, container, sourceType, {
+    stage: "clear-workspace",
+    redactions,
     cmd: [
       "/bin/sh",
       "-c",
@@ -379,6 +392,7 @@ async function materializeGitSource(
   container: Dockerode.Container,
   source: Extract<MaterializableSource, { type: "git" }>,
   user: string | undefined,
+  redactions: readonly string[],
   signal?: AbortSignal,
 ): Promise<void> {
   const authenticated = "username" in source;
@@ -397,6 +411,8 @@ async function materializeGitSource(
   try {
     if (authenticated) {
       await runSourceCommand(docker, container, "git", {
+        stage: "prepare-authentication",
+        redactions,
         cmd: ["/bin/sh", "-c", `cat > ${askpassPath} && chmod 0700 ${askpassPath}`],
         stdin: Buffer.from(GIT_ASKPASS),
         ...(user === undefined ? {} : { user }),
@@ -405,6 +421,8 @@ async function materializeGitSource(
     }
     if (source.revision === undefined) {
       await runSourceCommand(docker, container, "git", {
+        stage: "clone",
+        redactions,
         cmd: [
           "git",
           "clone",
@@ -421,18 +439,24 @@ async function materializeGitSource(
     }
 
     await runSourceCommand(docker, container, "git", {
+      stage: "initialize",
+      redactions,
       cmd: ["git", "-C", WORKSPACE, "init"],
       env,
       ...(user === undefined ? {} : { user }),
       ...(signal === undefined ? {} : { signal }),
     });
     await runSourceCommand(docker, container, "git", {
+      stage: "configure-remote",
+      redactions,
       cmd: ["git", "-C", WORKSPACE, "remote", "add", "origin", source.url],
       env,
       ...(user === undefined ? {} : { user }),
       ...(signal === undefined ? {} : { signal }),
     });
     await runSourceCommand(docker, container, "git", {
+      stage: "fetch",
+      redactions,
       cmd: [
         "git",
         "-C",
@@ -448,6 +472,8 @@ async function materializeGitSource(
       ...(signal === undefined ? {} : { signal }),
     });
     await runSourceCommand(docker, container, "git", {
+      stage: "checkout",
+      redactions,
       cmd: ["git", "-C", WORKSPACE, "checkout", "--detach", "FETCH_HEAD"],
       env,
       ...(user === undefined ? {} : { user }),
@@ -470,19 +496,24 @@ async function materializeSource(
   source: MaterializableSource,
   signal?: AbortSignal,
 ): Promise<void> {
+  const redactions = "username" in source
+    ? [source.url, source.username, source.password]
+    : [source.url];
   const info = await container.inspect(
     signal === undefined ? undefined : { abortSignal: signal },
   ).catch((error: unknown) => {
-    throw new SandboxSourceError(source.type, error);
+    throw new SandboxSourceError(source.type, "inspect-container", error, { redactions });
   });
   const configuredUser = info.Config.User ?? "";
   const user = configuredUser.length === 0 ? undefined : configuredUser;
-  await clearWorkspace(docker, container, source.type, user, signal);
+  await clearWorkspace(docker, container, source.type, user, redactions, signal);
   if (source.type === "git") {
-    await materializeGitSource(docker, container, source, user, signal);
+    await materializeGitSource(docker, container, source, user, redactions, signal);
     return;
   }
   await runSourceCommand(docker, container, "tarball", {
+    stage: "extract",
+    redactions,
     cmd: ["node", "--input-type=module", "-e", EXTRACT_TARBALL, source.url, WORKSPACE],
     ...(user === undefined ? {} : { user }),
     ...(signal === undefined ? {} : { signal }),

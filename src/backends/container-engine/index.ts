@@ -324,7 +324,13 @@ function translatedFailure(
       "source-failure",
       "LOCALBOX_SOURCE_FAILURE",
       error.message,
-      { type: "source", sourceType: error.sourceType },
+      {
+        type: "source",
+        sourceType: error.sourceType,
+        stage: error.stage,
+        exitCode: error.exitCode,
+        diagnostic: error.diagnostic,
+      },
     );
   }
   if (error instanceof ImagePullError) {

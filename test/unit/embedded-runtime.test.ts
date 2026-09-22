@@ -188,6 +188,63 @@ function listRequest(requestId: string) {
 
 
 describe("EmbeddedSandboxClient", () => {
+  test("preserves structured source failure diagnostics from the backend", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "localbox-embedded-runtime-"));
+    const reference = { backendId: "source-failure", backendType: "test" } as const;
+    const client = new EmbeddedSandboxClient(createBackend(reference, TEST_CAPABILITIES, {
+      createSandbox: async (request) => ({
+        ok: false,
+        error: {
+          category: "source-failure",
+          code: "LOCALBOX_SOURCE_FAILURE",
+          message: "Could not materialize the git sandbox source during clone (exit code 128): authentication failed",
+          retryable: false,
+          requestId: request.requestId,
+          backend: reference,
+          details: {
+            type: "source",
+            sourceType: "git",
+            stage: "clone",
+            exitCode: 128,
+            diagnostic: "authentication failed",
+          },
+        },
+      }),
+    }), { stateRoot });
+    const base = createRequest("source-failure", "source-failure", "source-failure");
+    try {
+      const result = await client.createSandbox({
+        ...base,
+        spec: {
+          ...base.spec,
+          source: {
+            type: "git",
+            url: "https://example.test/repository.git",
+            revision: null,
+            depth: 1,
+            credentials: null,
+          },
+        },
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "LOCALBOX_SOURCE_FAILURE",
+          details: {
+            type: "source",
+            sourceType: "git",
+            stage: "clone",
+            exitCode: 128,
+            diagnostic: "authentication failed",
+          },
+        },
+      });
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
   test("keeps coexisting backend instances isolated", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "localbox-embedded-runtime-"));
     try {

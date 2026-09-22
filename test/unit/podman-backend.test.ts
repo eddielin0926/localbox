@@ -218,28 +218,31 @@ describe("PodmanBackend", () => {
     });
   });
 
-  test("rootful ephemeral stop removes the container without using Podman's stop endpoint", async () => {
-    const sandboxName = "rootful-ephemeral-stop";
-    const service = await startPodmanService("rootful", "Podman Engine", sandboxName);
-    const backend = new PodmanBackend({ mode: "rootful", socketPath: service.socketPath });
+  test.each(["rootless", "rootful"] as const)(
+    "%s ephemeral stop force-removes the container without using Podman's stop endpoint",
+    async (mode) => {
+      const sandboxName = `${mode}-ephemeral-stop`;
+      const service = await startPodmanService(mode, "Podman Engine", sandboxName);
+      const backend = new PodmanBackend({ mode, socketPath: service.socketPath });
 
-    const result = await backend.stopSandbox({
-      requestId: "rootful-ephemeral-stop",
-      idempotencyKey: "rootful-ephemeral-stop",
-      deadline: null,
-      sandboxId: sandboxName,
-    });
+      const result = await backend.stopSandbox({
+        requestId: `${mode}-ephemeral-stop`,
+        idempotencyKey: `${mode}-ephemeral-stop`,
+        deadline: null,
+        sandboxId: sandboxName,
+      });
 
-    expect(result).toMatchObject({
-      ok: true,
-      value: { sandbox: { sandboxId: sandboxName, status: "stopped" } },
-    });
-    expect(service.requests.some((path) =>
-      path.includes(`/containers/${containerEngineContainerName(sandboxName)}?`) &&
-      path.includes("force=true")
-    )).toBe(true);
-    expect(service.requests.some((path) => path.includes("/stop"))).toBe(false);
-  });
+      expect(result).toMatchObject({
+        ok: true,
+        value: { sandbox: { sandboxId: sandboxName, status: "stopped" } },
+      });
+      expect(service.requests.some((path) =>
+        path.includes(`/containers/${containerEngineContainerName(sandboxName)}?`) &&
+        path.includes("force=true")
+      )).toBe(true);
+      expect(service.requests.some((path) => path.includes("/stop"))).toBe(false);
+    },
+  );
 
   test("rootless rejects hard resource guarantees before contacting Podman", async () => {
     const backend = new PodmanBackend({
