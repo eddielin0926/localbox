@@ -2,6 +2,8 @@ import { describe, expect, test } from "vitest";
 import { EmbeddedSandboxClient } from "../../src/runtime/index.js";
 import type {
   ClientFailure,
+  ClientResult,
+  DeleteSandboxResult,
   ProcessSignal,
   RawCommand,
   RawCommandEvent,
@@ -408,6 +410,50 @@ describe("EmbeddedSandboxClient command lifecycle", () => {
         },
       });
     }
+  });
+
+  test("preserves deletion cancellation when removal closes the raw command with a backend error", async () => {
+    const raw = new ControlledRawCommand();
+    const implementation = backend(raw);
+    const invoked = Promise.withResolvers<void>();
+    const deletion = Promise.withResolvers<ClientResult<DeleteSandboxResult>>();
+    implementation.deleteSandbox = () => {
+      invoked.resolve();
+      return deletion.promise;
+    };
+    const client = new EmbeddedSandboxClient(implementation);
+    const process = await start(client);
+    const waiting = client.waitForCommand({
+      requestId: "waiting-removal-error",
+      deadline: null,
+      sandboxId: "sandbox",
+      processId: process.processId,
+    });
+
+    const deleting = client.deleteSandbox({
+      requestId: "delete-removal-error",
+      idempotencyKey: "delete-removal-error",
+      deadline: null,
+      sandboxId: "sandbox",
+    });
+    await invoked.promise;
+    raw.emit({
+      type: "backend-failure",
+      code: "TEST_REMOVAL_CLOSED_COMMAND",
+      message: "sandbox removal closed the command",
+      retryable: false,
+    });
+    deletion.resolve({
+      ok: true,
+      value: { sandboxId: "sandbox", deletedAt: 1_700_000_000_500 },
+    });
+
+    await expect(deleting).resolves.toMatchObject({ ok: true });
+    await expect(waiting).resolves.toMatchObject({
+      ok: false,
+      error: { category: "cancelled", code: "LOCALBOX_OPERATION_CANCELLED" },
+    });
+    expect(raw.disposed).toBe(true);
   });
 
   test("cancels outstanding waiters and releases raw state when the sandbox is deleted", async () => {

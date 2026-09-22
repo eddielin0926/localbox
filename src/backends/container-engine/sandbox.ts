@@ -169,6 +169,10 @@ interface SignalOptions {
   signal?: AbortSignal;
 }
 
+interface StopOptions extends SignalOptions {
+  ephemeralStrategy?: "stop-then-remove" | "remove";
+}
+
 
 interface DockerPortBinding {
   HostIp?: string;
@@ -337,6 +341,7 @@ async function runSourceCommand(
     cmd: string[];
     env?: string[];
     stdin?: Buffer;
+    user?: string;
     signal?: AbortSignal;
   },
 ): Promise<void> {
@@ -355,6 +360,7 @@ async function clearWorkspace(
   docker: Dockerode,
   container: Dockerode.Container,
   sourceType: "git" | "tarball",
+  user: string | undefined,
   signal?: AbortSignal,
 ): Promise<void> {
   await runSourceCommand(docker, container, sourceType, {
@@ -363,6 +369,7 @@ async function clearWorkspace(
       "-c",
       `find ${WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +`,
     ],
+    ...(user === undefined ? {} : { user }),
     ...(signal === undefined ? {} : { signal }),
   });
 }
@@ -371,6 +378,7 @@ async function materializeGitSource(
   docker: Dockerode,
   container: Dockerode.Container,
   source: Extract<MaterializableSource, { type: "git" }>,
+  user: string | undefined,
   signal?: AbortSignal,
 ): Promise<void> {
   const authenticated = "username" in source;
@@ -391,6 +399,7 @@ async function materializeGitSource(
       await runSourceCommand(docker, container, "git", {
         cmd: ["/bin/sh", "-c", `cat > ${askpassPath} && chmod 0700 ${askpassPath}`],
         stdin: Buffer.from(GIT_ASKPASS),
+        ...(user === undefined ? {} : { user }),
         ...(signal === undefined ? {} : { signal }),
       });
     }
@@ -405,6 +414,7 @@ async function materializeGitSource(
           WORKSPACE,
         ],
         env,
+        ...(user === undefined ? {} : { user }),
         ...(signal === undefined ? {} : { signal }),
       });
       return;
@@ -413,11 +423,13 @@ async function materializeGitSource(
     await runSourceCommand(docker, container, "git", {
       cmd: ["git", "-C", WORKSPACE, "init"],
       env,
+      ...(user === undefined ? {} : { user }),
       ...(signal === undefined ? {} : { signal }),
     });
     await runSourceCommand(docker, container, "git", {
       cmd: ["git", "-C", WORKSPACE, "remote", "add", "origin", source.url],
       env,
+      ...(user === undefined ? {} : { user }),
       ...(signal === undefined ? {} : { signal }),
     });
     await runSourceCommand(docker, container, "git", {
@@ -432,17 +444,20 @@ async function materializeGitSource(
         source.revision,
       ],
       env,
+      ...(user === undefined ? {} : { user }),
       ...(signal === undefined ? {} : { signal }),
     });
     await runSourceCommand(docker, container, "git", {
       cmd: ["git", "-C", WORKSPACE, "checkout", "--detach", "FETCH_HEAD"],
       env,
+      ...(user === undefined ? {} : { user }),
       ...(signal === undefined ? {} : { signal }),
     });
   } finally {
     if (authenticated) {
       await rawExec(docker, container, {
         cmd: ["rm", "-f", askpassPath],
+        ...(user === undefined ? {} : { user }),
         ...(signal === undefined ? {} : { signal }),
       }).catch(() => undefined);
     }
@@ -455,13 +470,21 @@ async function materializeSource(
   source: MaterializableSource,
   signal?: AbortSignal,
 ): Promise<void> {
-  await clearWorkspace(docker, container, source.type, signal);
+  const info = await container.inspect(
+    signal === undefined ? undefined : { abortSignal: signal },
+  ).catch((error: unknown) => {
+    throw new SandboxSourceError(source.type, error);
+  });
+  const configuredUser = info.Config.User ?? "";
+  const user = configuredUser.length === 0 ? undefined : configuredUser;
+  await clearWorkspace(docker, container, source.type, user, signal);
   if (source.type === "git") {
-    await materializeGitSource(docker, container, source, signal);
+    await materializeGitSource(docker, container, source, user, signal);
     return;
   }
   await runSourceCommand(docker, container, "tarball", {
     cmd: ["node", "--input-type=module", "-e", EXTRACT_TARBALL, source.url, WORKSPACE],
+    ...(user === undefined ? {} : { user }),
     ...(signal === undefined ? {} : { signal }),
   });
 }
@@ -1030,10 +1053,21 @@ export class Sandbox {
     });
   }
 
-  async stop(options: SignalOptions = {}): Promise<void> {
+  async stop(options: StopOptions = {}): Promise<void> {
     this.#assertUsable();
     throwIfAborted(options.signal);
     await this.#withLifecycle(async () => {
+      if (!this.persistent && options.ephemeralStrategy === "remove") {
+        this.#status = "stopping";
+        try {
+          await this.#container.remove({ force: true });
+        } catch (error) {
+          if (!isNotFound(error)) translateDockerError(error);
+        }
+        this.#status = "stopped";
+        this.#expiresAt = undefined;
+        return;
+      }
       let info: Dockerode.ContainerInspectInfo;
       try {
         info = await this.#container.inspect();

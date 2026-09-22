@@ -320,6 +320,7 @@ export class PodmanBackend extends ContainerEngineBackend {
       unavailableCode: "LOCALBOX_PODMAN_UNAVAILABLE",
       unavailableMessage: "Cannot connect to Podman. Start the matching API service and retry.",
       failureCode: "LOCALBOX_PODMAN_FAILURE",
+      ...(mode === "rootful" ? { ephemeralStopStrategy: "remove" as const } : {}),
       probeAvailability: (request) =>
         probePodmanAvailability(client, reference, mode, request),
       async beforeOperation(signal) {

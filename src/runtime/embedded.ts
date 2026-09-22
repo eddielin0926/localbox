@@ -676,6 +676,7 @@ interface RuntimeProcess {
   readonly completion: Promise<ProcessOutcome>;
   readonly resolveCompletion: (outcome: ProcessOutcome) => void;
   readonly signals: Map<ProcessSignal, Promise<void>>;
+  deletion?: Promise<boolean>;
   retainedBytes: number;
   truncated: boolean;
   version: number;
@@ -868,7 +869,12 @@ async function consumeRawCommand(state: RuntimeProcess): Promise<void> {
         retainOutput(state, event);
         continue;
       }
-      settleProcess(state, event);
+      if (event.type === "backend-failure" && state.deletion !== undefined) {
+        const deleted = await state.deletion;
+        settleProcess(state, deleted ? { type: "deleted" } : event);
+      } else {
+        settleProcess(state, event);
+      }
       return;
     }
     settleProcess(state, {
@@ -1264,8 +1270,19 @@ export class EmbeddedSandboxClient implements SandboxClient {
       } catch {
         return stateFailure(request, this.backendReference, "inspectDeleteOwnership");
       }
+      const deletion = Promise.withResolvers<boolean>();
+      const deleting: RuntimeProcess[] = [];
+      for (const state of this.#processes.values()) {
+        if (state.sandboxId !== request.sandboxId || state.deletion !== undefined) continue;
+        state.deletion = deletion.promise;
+        deleting.push(state);
+      }
       const result = await this.#invoke("deleteSandbox", request);
+      deletion.resolve(result.ok);
       if (!result.ok) {
+        for (const state of deleting) {
+          if (state.deletion === deletion.promise) delete state.deletion;
+        }
         if (result.error.category === "not-found") await this.#cleanupAbsent(request.sandboxId);
         return result;
       }

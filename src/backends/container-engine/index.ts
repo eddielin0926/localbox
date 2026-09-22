@@ -178,6 +178,7 @@ export interface ContainerEngineDriver {
   readonly unavailableCode: string;
   readonly unavailableMessage: string;
   readonly failureCode: string;
+  readonly ephemeralStopStrategy?: "stop-then-remove" | "remove";
   probeAvailability(
     request: ProbeAvailabilityRequest,
   ): Promise<ClientResult<ProbeAvailabilityResult>>;
@@ -613,7 +614,12 @@ export class ContainerEngineBackend implements SandboxBackend {
   stopSandbox(request: StopSandboxRequest): Promise<ClientResult<StopSandboxResult>> {
     return this.#run(request, "stopSandbox", async (signal) => {
       const sandbox = await ContainerEngineSandbox.get(this.#client, { name: request.sandboxId, ...(signal === undefined ? {} : { signal }) });
-      await sandbox.stop(signal === undefined ? {} : { signal });
+      await sandbox.stop({
+        ...(signal === undefined ? {} : { signal }),
+        ...(this.#driver.ephemeralStopStrategy === undefined
+          ? {}
+          : { ephemeralStrategy: this.#driver.ephemeralStopStrategy }),
+      });
       return { sandbox: sandboxRecord(sandbox, this.reference) };
     });
   }
