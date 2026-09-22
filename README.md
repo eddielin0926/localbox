@@ -4,7 +4,7 @@ Run cloud sandbox SDKs locally during development with Docker or Podman.
 
 Localbox is an open-source local development runtime for applications that depend on cloud sandbox SDKs. Its goal is to let those applications run locally with zero or near-zero application-code changes, initially for Vercel Sandbox. Docker remains the default compatibility backend; the neutral runtime also exposes explicit Docker, Podman, process, and Bubblewrap backends.
 
-Localbox v0.3.1 provides the Vercel-compatible `localbox/vercel` API, the public backend-neutral `localbox/runtime` entry point, and an explicit, opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. The v0.4 development contract adds explicit boot artifacts, availability diagnostics, and additional local backends while preserving the published compatibility and interception behavior. No hosted Localbox service, credentials, or configuration file is required for either local path.
+The pending Localbox v0.4.0 release candidate provides the Vercel-compatible `localbox/vercel` API, the public backend-neutral `localbox/runtime` entry point, and an explicit, opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. It adds capability negotiation, XDG-backed sandbox metadata, explicit boot artifacts and availability diagnostics, and opt-in Podman, process, and Bubblewrap backends while preserving the published compatibility and interception behavior. No hosted Localbox service, credentials, or configuration file is required for any local path.
 
 See [ROADMAP.md](ROADMAP.md) for planned compatibility frontends, isolation backends, distributed runtime, Kubernetes deployment, and AWS, Azure, and Google Cloud milestones.
 
@@ -247,7 +247,7 @@ Paths are relative to `/vercel/sandbox` unless absolute. Methods accept an `Abor
 
 ## Vercel compatibility
 
-Vercel Sandbox is Localbox's current compatibility target. Localbox v0.3.1 supports direct `localbox/vercel` imports and explicit development interception for the unchanged `@vercel/sandbox` import while routing the frontend through the neutral runtime.
+Vercel Sandbox is Localbox's current compatibility target. The pending Localbox v0.4.0 release candidate supports direct `localbox/vercel` imports and explicit development interception for the unchanged `@vercel/sandbox` import while routing the frontend through the neutral runtime.
 
 Compatibility is checked against `@vercel/sandbox@3.3.0`. The versioned [`compatibility.json`](src/vercel/compatibility.json) records each assessed method, its type compatibility, behavioral differences, and unsupported APIs. Run the report locally with:
 
@@ -261,7 +261,7 @@ The complete documented `Command` and `FileSystem` method sets in that manifest 
 
 | Area | Localbox behavior |
 | --- | --- |
-| Import | Direct imports use `localbox/vercel`; Localbox v0.3.1 can intercept the unchanged `@vercel/sandbox` import only under `localbox --`. |
+| Import | Direct imports use `localbox/vercel`; the pending Localbox v0.4.0 release candidate can intercept the unchanged `@vercel/sandbox` import only under `localbox --`. |
 | URLs | Exposed ports use loopback URLs; there is no public domain or reverse proxy. |
 | Isolation | The default Docker backend and explicit Podman backend share the host kernel instead of using microVM isolation. |
 | Persistence | A stopped persistent container retains its writable layer; snapshots are not portable. |
@@ -299,6 +299,8 @@ Localbox is intended for local development and trusted workloads. Docker and Pod
 Rootless Podman reduces service authority: container root is user-namespace root mapped to the invoking account rather than host root. It does not prevent access available to that account or eliminate shared-kernel risk. Rootful Podman and Docker daemons expose a root-authority control socket; anyone who can access that socket should be treated as having equivalent host control. Localbox never mounts the Podman socket into a sandbox, but callers must protect it and the Localbox state root.
 
 `ProcessBackend` executes directly as the current OS user with shared host files, credentials, processes, networking, and resources. Its private workspace is bookkeeping and path containment for Localbox file operations, not a sandbox. Use it only for explicitly trusted single-user code. Directory, disk-image, and snapshot artifacts are modeled for future backends but are not executed today; Localbox makes no portability, upload/storage, VM-isolation, or restore guarantee for them.
+
+`BwrapBackend` adds Linux user, mount, PID, IPC, and UTS namespace isolation with a narrow filesystem view and optional network namespace separation. It still shares the host kernel, has no Localbox seccomp or cgroup policy, and is intended only for trusted or single-tenant local development; it is not a hostile multi-tenant boundary.
 
 ## Troubleshooting
 
