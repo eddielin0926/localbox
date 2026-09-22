@@ -2,7 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { createServer, isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe } from "vitest";
@@ -35,6 +35,8 @@ let gitDaemon: ChildProcess | undefined;
 let gitDaemonClosed: Promise<void> | undefined;
 let gitDaemonError: Error | undefined;
 let gitSourceUrl: string | undefined;
+let gitSidecarName: string | undefined;
+const podmanUrl = `unix://${podmanSocketPath}`;
 
 async function allocateTcpPort(): Promise<number> {
   const server = createServer();
@@ -111,6 +113,146 @@ async function startGitDaemon(): Promise<{
   throw new Error(`Git fixture daemon failed to start: ${failures.join("; ")}`);
 }
 
+function commandFailure(error: unknown): string {
+  if (!(error instanceof Error)) return String(error).slice(-4096);
+  const output = error as Error & {
+    readonly stdout?: string | Buffer;
+    readonly stderr?: string | Buffer;
+  };
+  return [output.message, output.stdout?.toString(), output.stderr?.toString()]
+    .filter((part): part is string => part !== undefined && part.length > 0)
+    .join("\n")
+    .trim()
+    .slice(-4096);
+}
+
+function runPodman(args: readonly string[], timeout = 10_000): string {
+  try {
+    return execFileSync(
+      "podman",
+      ["--remote", "--url", podmanUrl, ...args],
+      {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        timeout,
+      },
+    ).trim();
+  } catch (error) {
+    throw new Error(
+      `podman ${args[0] ?? "command"} failed: ${commandFailure(error)}`,
+    );
+  }
+}
+
+function sidecarDiagnostic(args: readonly string[]): string {
+  try {
+    const output = runPodman(args, 5_000);
+    return output.length > 0 ? output.slice(-4096) : "(no output)";
+  } catch (error) {
+    return commandFailure(error);
+  }
+}
+
+function gitSidecarFailure(name: string, message: string): Error {
+  const state = sidecarDiagnostic([
+    "inspect",
+    "--format",
+    "{{json .State}}",
+    name,
+  ]);
+  const logs = sidecarDiagnostic(["logs", "--tail", "50", name]);
+  return new Error(
+    [`${message}: ${name}`, `State: ${state}`, `Logs: ${logs}`].join("\n"),
+  );
+}
+
+function waitForGitSidecar(name: string, address: string): void {
+  let lastFailure = "readiness command did not run";
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const refs = runPodman(
+        [
+          "exec",
+          name,
+          "git",
+          "ls-remote",
+          `git://${address}:9418/fixture.git`,
+          "HEAD",
+        ],
+        2_000,
+      );
+      if (refs.length > 0) return;
+      lastFailure = "git ls-remote returned no HEAD";
+    } catch (error) {
+      lastFailure = commandFailure(error);
+    }
+  }
+
+  throw gitSidecarFailure(
+    name,
+    `Git fixture sidecar did not become ready: ${lastFailure}`,
+  );
+}
+
+function startGitSidecar(): string {
+  const fixtureId = randomUUID();
+  const name = `localbox-podman-git-${fixtureId}`;
+  gitSidecarName = name;
+  if (process.getuid === undefined || process.getgid === undefined) {
+    throw new Error("Podman Git fixtures require a POSIX host.");
+  }
+  const fixtureUser = `${process.getuid()}:${process.getgid()}`;
+  runPodman(
+    [
+      "run",
+      "--detach",
+      "--name",
+      name,
+      "--label",
+      "io.localbox.test=podman-conformance",
+      "--label",
+      `io.localbox.fixture=${fixtureId}`,
+      "--network",
+      "podman",
+      "--user",
+      fixtureUser,
+      "--read-only",
+      "--mount",
+      `type=bind,source=${gitRepository},target=/srv/git/fixture.git,readonly`,
+      MANAGED_IMAGES.node24,
+      "git",
+      "daemon",
+      "--verbose",
+      "--reuseaddr",
+      "--base-path=/srv/git",
+      "--strict-paths",
+      "--export-all",
+      "--listen=0.0.0.0",
+      "--port=9418",
+      "--enable=upload-pack",
+      "--disable=upload-archive",
+      "--disable=receive-pack",
+      "/srv/git/fixture.git",
+    ],
+    120_000,
+  );
+
+  const address = runPodman([
+    "inspect",
+    "--format",
+    '{{(index .NetworkSettings.Networks "podman").IPAddress}}',
+    name,
+  ]);
+  if (isIP(address) !== 4) {
+    throw gitSidecarFailure(
+      name,
+      `Git fixture sidecar has no IPv4 address on the podman network: ${address || "(empty)"}`,
+    );
+  }
+  waitForGitSidecar(name, address);
+  return `git://${address}:9418/fixture.git`;
+}
+
 beforeAll(async () => {
   if (socketPath === undefined) return;
 
@@ -154,15 +296,22 @@ beforeAll(async () => {
   );
   execFileSync("git", ["clone", "--quiet", "--bare", gitWorktree, gitRepository]);
 
-  const fixture = await startGitDaemon();
-  gitDaemon = fixture.daemon;
-  gitDaemonClosed = fixture.closed;
-  gitSourceUrl =
-    `git://host.containers.internal:${fixture.port}/fixture.git`;
-});
+  if (mode === "rootless") {
+    const fixture = await startGitDaemon();
+    gitDaemon = fixture.daemon;
+    gitDaemonClosed = fixture.closed;
+    gitSourceUrl =
+      `git://host.containers.internal:${fixture.port}/fixture.git`;
+  } else {
+    gitSourceUrl = startGitSidecar();
+  }
+}, 180_000);
 
 afterAll(async () => {
   try {
+    if (gitSidecarName !== undefined) {
+      runPodman(["rm", "--force", "--ignore", gitSidecarName]);
+    }
     if (
       gitDaemon !== undefined &&
       gitDaemon.exitCode === null &&
@@ -175,7 +324,7 @@ afterAll(async () => {
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
-});
+}, 20_000);
 
 describe.skipIf(socketPath === undefined)("configured Podman service", () => {
   const createBackend = (): PodmanBackend => new PodmanBackend({ mode, socketPath: podmanSocketPath });
