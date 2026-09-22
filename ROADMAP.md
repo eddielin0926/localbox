@@ -1,6 +1,6 @@
 # Localbox roadmap
 
-Localbox aims to let cloud-sandbox-dependent applications run locally during development while preserving provider imports wherever interception is technically possible. The v0.3 release line exposes a Vercel-compatible frontend through `localbox/vercel`, an opt-in development interceptor, and a neutral runtime/backend boundary; later milestones add more frontends and backends, and deployment modes ranging from embedded use to distributed infrastructure on AWS, Azure, or Google Cloud.
+Localbox aims to let cloud-sandbox-dependent applications run locally during development while preserving provider imports wherever interception is technically possible. The pending v0.4.0 release candidate exposes a Vercel-compatible frontend through `localbox/vercel`, an opt-in development interceptor, a neutral runtime/backend boundary, and explicit Docker, Podman, process, and Bubblewrap backends; later milestones add more frontends and deployment modes ranging from embedded use to distributed infrastructure on AWS, Azure, or Google Cloud.
 
 This roadmap describes direction rather than release dates. Milestones are ordered by dependency; scope may move as compatibility targets and upstream SDKs evolve.
 
@@ -134,6 +134,8 @@ Exit criteria:
 - A backend can be selected through runtime construction without mutable global configuration.
 
 ### M3 — Pluggable local backends
+
+**Status:** Implementation and exit criteria complete; v0.4.0 publication pending.
 
 Prove that the backend boundary supports materially different execution models.
 
