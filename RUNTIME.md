@@ -69,6 +69,16 @@ The asynchronous `SandboxClient` covers availability plus the behavior required 
 
 `EmbeddedSandboxClient` is constructed with exactly one `SandboxBackend` instance and remains bound to it. A `null` backend in a create request uses that injected instance; a non-null reference must match its stable ID and type. Applications that need multiple backends construct multiple clients, so selection never depends on a default, registry, singleton, or mutable global state. The constructor accepts either an explicit absolute state root or a preconstructed `LocalSandboxStateStore`; the default composition supplies the platform-resolved state root.
 
+## Frontend adapter boundary
+
+`localbox/frontend` binds provider-owned request, result, and error translation to either one public `SandboxClient` or an explicit `SandboxClientFactory`. Request translation is synchronous and completes option validation before a factory is invoked. The contract imports no concrete backend, creates no default client, caches no factory result, and exposes no global registry or mutable backend selection. Default embedded composition remains an application-entry-point concern outside adapters.
+
+Frontend support classification is separate from backend capability support. Its exact states are `native`, `emulated`, `partial`, `not-applicable`, and `unsupported`; every non-native compatibility-manifest entry carries a rationale. Native, emulated, and partial entries are reported as supported at their stated level. Not-applicable describes only hosted control-plane concerns with no local semantic effect, while unsupported means requested observable behavior cannot be honored; neither counts as support.
+
+Provider option policy covers security, isolation, network, resource, storage, snapshot, session, terminal, and hosted control-plane inputs. Adapters reject unsupported requests during synchronous translation, before client resolution or sandbox creation. A truly not-applicable cloud-only option is returned as an explicit policy decision for provider reporting. Omitting a requested option without either translation or one of those decisions violates the frontend contract.
+
+Command conformance uses discriminated shapes rather than a universal command bag. `{ kind: "shell", command }` preserves provider-defined shell interpretation; `{ kind: "argv", executable, arguments }` bypasses shell interpretation. Execution returns `{ kind: "completion", completion }`, while start/detach returns `{ kind: "process", process }`. Provider suites exercise those input and outcome semantics independently.
+
 ## Local state and sandbox-name ownership
 
 `resolveLocalStateRoot` uses `$XDG_STATE_HOME/localbox` only when `XDG_STATE_HOME` is an absolute path, as required by the XDG Base Directory specification. An unset, empty, or relative value is ignored and falls back to `<homedir>/.local/state/localbox`. An explicit constructor override must also be absolute. This injection point isolates tests and permits multiple runtime instances to share or intentionally separate ownership domains.
