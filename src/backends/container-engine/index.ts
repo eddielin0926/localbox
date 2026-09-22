@@ -179,6 +179,7 @@ export interface ContainerEngineDriver {
   readonly unavailableMessage: string;
   readonly failureCode: string;
   readonly ephemeralStopStrategy?: "stop-then-remove" | "remove";
+  readonly noNewPrivileges?: boolean;
   readonly execSessionNotFound?: (error: unknown) => boolean;
   probeAvailability(
     request: ProbeAvailabilityRequest,
@@ -404,7 +405,10 @@ function sourceOptions(source: CreateSandboxRequest["spec"]["source"]): SandboxS
       };
 }
 
-function createOptions(request: CreateSandboxRequest, signal: AbortSignal | undefined): SandboxCreateOptions {
+function createOptions(
+  request: CreateSandboxRequest,
+  signal: AbortSignal | undefined,
+): SandboxCreateOptions {
   const spec = request.spec;
   const validation = validateBootArtifact(spec.bootArtifact);
   if (!validation.ok) {
@@ -572,7 +576,11 @@ export class ContainerEngineBackend implements SandboxBackend {
     return this.#run(request, "createSandbox", async (signal) => {
       await this.#driver.beforeCreate?.(request, signal);
       await this.#driver.beforeOperation?.(signal);
-      const sandbox = await ContainerEngineSandbox.create(this.#client, createOptions(request, signal));
+      const sandbox = await ContainerEngineSandbox.create(
+        this.#client,
+        createOptions(request, signal),
+        this.#driver.noNewPrivileges ?? true,
+      );
       return { sandbox: sandboxRecord(sandbox, this.reference) };
     }, false);
   }

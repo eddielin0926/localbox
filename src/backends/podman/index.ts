@@ -61,7 +61,7 @@ export const PODMAN_ROOTFUL_CAPABILITIES = Object.freeze({
   isolation: {
     support: "partial",
     constraints: { level: "shared-kernel-container", tenancies: ["trusted", "single-tenant"] },
-    diagnostic: "Rootful Podman containers share the host kernel and the service has host-root authority; use only trusted or single-tenant workloads, not hostile multi-tenancy.",
+    diagnostic: "Rootful Podman containers share the host kernel and the service has host-root authority. Localbox omits no-new-privileges for rootful Podman to preserve networking on affected AppArmor/crun hosts; use only trusted or single-tenant workloads, not hostile multi-tenancy.",
   },
   artifacts: {
     support: "partial",
@@ -327,6 +327,9 @@ export class PodmanBackend extends ContainerEngineBackend {
       unavailableMessage: "Cannot connect to Podman. Start the matching API service and retry.",
       failureCode: "LOCALBOX_PODMAN_FAILURE",
       ephemeralStopStrategy: "remove",
+      // Ubuntu's crun AppArmor profile denies network socket creation when
+      // Podman applies no-new-privileges (Launchpad #2118824).
+      ...(mode === "rootful" ? { noNewPrivileges: false } : {}),
       ...(mode === "rootful"
         ? { execSessionNotFound: isMissingPodmanExecSession }
         : {}),

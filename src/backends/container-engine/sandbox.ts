@@ -809,8 +809,12 @@ export class Sandbox {
     return sandboxPaginator(items, limit, start);
   }
 
-  static async create(docker: Dockerode, options: SandboxCreateOptions): Promise<Sandbox> {
-    return Sandbox.#create(docker, options, undefined, options.onResume);
+  static async create(
+    docker: Dockerode,
+    options: SandboxCreateOptions,
+    noNewPrivileges = true,
+  ): Promise<Sandbox> {
+    return Sandbox.#create(docker, options, undefined, options.onResume, noNewPrivileges);
   }
 
   static async get(docker: Dockerode, options: SandboxGetOptions): Promise<Sandbox> {
@@ -861,6 +865,7 @@ export class Sandbox {
     options: SandboxCreateOptions,
     onCreate?: (sandbox: Sandbox) => Promise<void>,
     onResume?: (sandbox: Sandbox) => Promise<void>,
+    noNewPrivileges = true,
   ): Promise<Sandbox> {
     const normalized = normalizeCreateOptions(options);
     await ensureDocker(docker, normalized.signal);
@@ -903,7 +908,7 @@ export class Sandbox {
           AutoRemove: !normalized.persistent,
           NetworkMode: normalized.networkMode,
           PortBindings: portBindings,
-          SecurityOpt: ["no-new-privileges"],
+          SecurityOpt: noNewPrivileges ? ["no-new-privileges"] : [],
           ...(normalized.vcpus === undefined
             ? {}
             : {
