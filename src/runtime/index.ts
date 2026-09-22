@@ -666,6 +666,12 @@ export type AvailabilityDiagnosticCode =
   | "DOCKER_SOCKET_NOT_FOUND"
   | "DOCKER_SOCKET_PERMISSION_DENIED"
   | "DOCKER_DAEMON_UNREACHABLE"
+  | "PODMAN_SERVICE_AVAILABLE"
+  | "PODMAN_SOCKET_NOT_FOUND"
+  | "PODMAN_SOCKET_PERMISSION_DENIED"
+  | "PODMAN_SERVICE_UNREACHABLE"
+  | "PODMAN_ENGINE_MISMATCH"
+  | "PODMAN_MODE_MISMATCH"
   | "PROCESS_PREREQUISITES_AVAILABLE"
   | "PROCESS_PLATFORM_UNSUPPORTED"
   | "PROCESS_ROOT_INVALID"
@@ -687,6 +693,18 @@ export type AvailabilityDiagnosticDetails =
     readonly type: "docker-daemon";
     readonly reason: "available" | "not-found" | "permission-denied" | "unreachable";
     readonly apiVersion: string | null;
+  })
+  | (JsonObject & {
+    readonly type: "podman-service";
+    readonly reason:
+      | "available"
+      | "not-found"
+      | "permission-denied"
+      | "unreachable"
+      | "engine-mismatch"
+      | "mode-mismatch";
+    readonly apiVersion: string | null;
+    readonly mode: "rootless" | "rootful" | null;
   })
   | (JsonObject & {
     readonly type: "process-platform";
@@ -782,9 +800,23 @@ export type BackendErrorDetails = JsonObject & {
   readonly operation: string;
 };
 
+export type SourceErrorStage =
+  | "inspect-container"
+  | "clear-workspace"
+  | "prepare-authentication"
+  | "clone"
+  | "initialize"
+  | "configure-remote"
+  | "fetch"
+  | "checkout"
+  | "extract";
+
 export type SourceErrorDetails = JsonObject & {
   readonly type: "source";
   readonly sourceType: "git" | "tarball";
+  readonly stage?: SourceErrorStage;
+  readonly exitCode?: number | null;
+  readonly diagnostic?: string | null;
 };
 
 export type FileErrorDetails = JsonObject & {
@@ -950,4 +982,13 @@ export {
   BWRAP_VIRTUAL_WORKSPACE,
   BwrapBackend,
 } from "../backends/bwrap/index.js";
+export {
+  PODMAN_ROOTFUL_CAPABILITIES,
+  PODMAN_ROOTLESS_CAPABILITIES,
+  PodmanBackend,
+} from "../backends/podman/index.js";
+export type {
+  PodmanBackendOptions,
+  PodmanMode,
+} from "../backends/podman/index.js";
 export type { BwrapBackendOptions } from "../backends/bwrap/index.js";

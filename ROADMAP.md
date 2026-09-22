@@ -149,7 +149,7 @@ Deliverables:
 
 Exit criteria:
 
-- Docker, process, and bwrap pass the applicable backend conformance profile.
+- Docker, configured Podman modes, process, and bwrap pass the applicable backend conformance profile.
 - Unsupported artifact or isolation requirements fail before sandbox creation.
 - Multiple backend instances can coexist in one process.
 - Documentation states the security boundary of every backend.

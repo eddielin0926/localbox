@@ -19,9 +19,14 @@ const COMMAND_WRAPPER = String.raw`
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import * as fs from "node:fs/promises";
+import { constants } from "node:os";
 const pidPath = process.argv[1];
-const command = process.argv[2];
-const args = process.argv.slice(3);
+const statusPath = process.argv[2];
+const command = process.argv[3];
+const args = process.argv.slice(4);
+const writeStatus = async (exitCode) => {
+  if (statusPath.length > 0) await fs.writeFile(statusPath, String(exitCode));
+};
 const child = spawn(command, args, { stdio: "inherit" });
 const spawned = once(child, "spawn");
 const exited = once(child, "exit");
@@ -35,10 +40,14 @@ try {
 await fs.writeFile(pidPath, String(child.pid));
 const [code, signal] = await exited;
 await fs.rm(pidPath, { force: true });
+const exitCode = signal
+  ? 128 + (constants.signals[signal] ?? 0)
+  : code ?? 1;
+if (signal) await writeStatus(exitCode);
 if (signal) {
   process.kill(process.pid, signal);
 } else {
-  process.exit(code ?? 1);
+  process.exit(exitCode);
 }
 `;
 
@@ -50,6 +59,11 @@ export interface StartRawCommandOptions {
   user?: string;
   stdin?: Buffer;
   signal?: AbortSignal;
+  /**
+   * Matches a missing inspect record for an already-started exec session.
+   * Only engines known to discard completed sessions should provide this.
+   */
+  execSessionNotFound?: (error: unknown) => boolean;
 }
 
 class DockerRawCommand implements RawCommand {
@@ -59,6 +73,8 @@ class DockerRawCommand implements RawCommand {
   readonly #container: Dockerode.Container;
   readonly #exec: Dockerode.Exec;
   readonly #pidPath: string;
+  readonly #statusPath: string | undefined;
+  readonly #execSessionNotFound: ((error: unknown) => boolean) | undefined;
   readonly #queuedEvents: RawCommandEvent[] = [];
   readonly #followers = new Set<() => void>();
   #closed = false;
@@ -69,12 +85,16 @@ class DockerRawCommand implements RawCommand {
     container: Dockerode.Container,
     exec: Dockerode.Exec,
     pidPath: string,
+    statusPath: string | undefined,
+    execSessionNotFound: ((error: unknown) => boolean) | undefined,
     stream: NodeJS.ReadWriteStream,
   ) {
     this.#docker = docker;
     this.#container = container;
     this.#exec = exec;
     this.#pidPath = pidPath;
+    this.#statusPath = statusPath;
+    this.#execSessionNotFound = execSessionNotFound;
     this.startedAt = Date.now();
     this.events = this.#iterateEvents();
     void this.#pump(stream);
@@ -82,9 +102,15 @@ class DockerRawCommand implements RawCommand {
 
   async signal(signal: ProcessSignal, abortSignal?: AbortSignal): Promise<void> {
     throwIfAborted(abortSignal);
-    const info = await this.#exec.inspect(
-      abortSignal === undefined ? undefined : { abortSignal },
-    );
+    let info: Dockerode.ExecInspectInfo;
+    try {
+      info = await this.#exec.inspect(
+        abortSignal === undefined ? undefined : { abortSignal },
+      );
+    } catch (error) {
+      if (this.#execSessionNotFound?.(error)) return;
+      throw error;
+    }
     if (!info.Running) return;
 
     try {
@@ -100,10 +126,39 @@ class DockerRawCommand implements RawCommand {
         ...(abortSignal === undefined ? {} : { signal: abortSignal }),
       });
     } catch (error) {
-      const current = await this.#exec.inspect().catch(() => undefined);
-      if (current !== undefined && !current.Running) return;
+      let sessionMissing = false;
+      const current = await this.#exec.inspect().catch((inspectError: unknown) => {
+        sessionMissing = this.#execSessionNotFound?.(inspectError) ?? false;
+        return undefined;
+      });
+      if (sessionMissing || current !== undefined && !current.Running) return;
       throw error;
     }
+  }
+
+  async #readCompletionStatus(): Promise<number | undefined> {
+    if (this.#statusPath === undefined) return undefined;
+    const result = await rawExec(this.#docker, this.#container, {
+      cmd: [
+        "/bin/sh",
+        "-c",
+        'value=$(cat -- "$1") || exit 1; rm -f -- "$1"; printf "%s" "$value"',
+        "--",
+        this.#statusPath,
+      ],
+    }).catch(() => undefined);
+    if (result === undefined || result.exitCode !== 0) return undefined;
+    const value = result.stdout.toString("utf8");
+    if (!/^(0|[1-9]\d*)$/.test(value)) return undefined;
+    const exitCode = Number(value);
+    return Number.isSafeInteger(exitCode) && exitCode >= 0 ? exitCode : undefined;
+  }
+
+  async #removeCompletionStatus(): Promise<void> {
+    if (this.#statusPath === undefined) return;
+    await rawExec(this.#docker, this.#container, {
+      cmd: ["rm", "-f", "--", this.#statusPath],
+    }).catch(() => undefined);
   }
 
   async dispose(): Promise<void> {
@@ -200,16 +255,32 @@ class DockerRawCommand implements RawCommand {
       const stderr = stderrDecoder.end();
       if (stdout.length > 0) this.#publish({ type: "stdout", data: stdout });
       if (stderr.length > 0) this.#publish({ type: "stderr", data: stderr });
-      let info = await this.#exec.inspect();
-      while (info.Running) {
-        await delay(10);
+      let info: Dockerode.ExecInspectInfo;
+      try {
         info = await this.#exec.inspect();
+        while (info.Running) {
+          await delay(10);
+          info = await this.#exec.inspect();
+        }
+      } catch (error) {
+        if (!this.#execSessionNotFound?.(error)) throw error;
+        // The wrapper records a conventional exit code before mirroring a child signal.
+        const exitCode = await this.#readCompletionStatus();
+        if (exitCode === undefined) throw error;
+        this.#finish({
+          type: "complete",
+          exitCode,
+          finishedAt: Date.now(),
+        });
+        return;
       }
+      const exitCode = info.ExitCode ?? 0;
       this.#finish({
         type: "complete",
-        exitCode: info.ExitCode ?? 0,
+        exitCode,
         finishedAt: Date.now(),
       });
+      if (exitCode >= 128) void this.#removeCompletionStatus();
     } catch (error) {
       let translated: unknown = error;
       try {
@@ -238,7 +309,11 @@ export async function startRawCommand(
   options: StartRawCommandOptions,
 ): Promise<RawCommand> {
   throwIfAborted(options.signal);
-  const pidPath = `/tmp/localbox/command-${randomUUID()}.pid`;
+  const commandId = randomUUID();
+  const pidPath = `/tmp/localbox/command-${commandId}.pid`;
+  const statusPath = options.execSessionNotFound === undefined
+    ? undefined
+    : `/tmp/localbox/command-${commandId}.status`;
   try {
     const attachStdin = options.stdin !== undefined;
     const exec = await container.exec({
@@ -246,7 +321,7 @@ export async function startRawCommand(
       AttachStdout: true,
       AttachStderr: true,
       Tty: false,
-      Cmd: ["node", "--input-type=module", "-e", COMMAND_WRAPPER, pidPath, ...options.cmd],
+      Cmd: ["node", "--input-type=module", "-e", COMMAND_WRAPPER, pidPath, statusPath ?? "", ...options.cmd],
       WorkingDir: options.cwd,
       Env: options.env,
       ...(options.user === undefined ? {} : { User: options.user }),
@@ -260,7 +335,15 @@ export async function startRawCommand(
       stdin: attachStdin,
       ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
     });
-    const command = new DockerRawCommand(docker, container, exec, pidPath, stream);
+    const command = new DockerRawCommand(
+      docker,
+      container,
+      exec,
+      pidPath,
+      statusPath,
+      options.execSessionNotFound,
+      stream,
+    );
     if (options.stdin !== undefined) stream.end(options.stdin);
     return command;
   } catch (error) {

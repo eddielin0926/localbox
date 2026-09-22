@@ -1,8 +1,8 @@
 # Localbox
 
-Run cloud sandbox SDKs locally during development with Docker.
+Run cloud sandbox SDKs locally during development with Docker or Podman.
 
-Localbox is an open-source local development runtime for applications that depend on cloud sandbox SDKs. Its goal is to let those applications run locally with zero or near-zero application-code changes, initially for Vercel Sandbox on Docker.
+Localbox is an open-source local development runtime for applications that depend on cloud sandbox SDKs. Its goal is to let those applications run locally with zero or near-zero application-code changes, initially for Vercel Sandbox. Docker remains the default compatibility backend; the neutral runtime also exposes explicit Docker, Podman, process, and Bubblewrap backends.
 
 Localbox v0.3.1 provides the Vercel-compatible `localbox/vercel` API, the public backend-neutral `localbox/runtime` entry point, and an explicit, opt-in `localbox --` wrapper that redirects supported Node.js ESM imports of `@vercel/sandbox` during local development. The v0.4 development contract adds explicit boot artifacts, availability diagnostics, and additional local backends while preserving the published compatibility and interception behavior. No hosted Localbox service, credentials, or configuration file is required for either local path.
 
@@ -10,20 +10,20 @@ See [ROADMAP.md](ROADMAP.md) for planned compatibility frontends, isolation back
 
 ## Features
 
-- Create, stop, resume, list, and delete named Docker sandboxes.
+- Create, stop, resume, list, and delete named Docker or Podman sandboxes.
 - Run blocking or detached commands with buffered and streaming output.
 - Read and write files through a Node.js-style filesystem API.
 - Keep a sandbox filesystem across stops with persistent containers.
 - Expose container ports on loopback-only host URLs.
 - Use Vercel-shaped types and behavior for the supported surface.
 - Describe host, directory, OCI image, disk image, and snapshot boot inputs with JSON-safe trust and mutability declarations.
-- Probe Docker or trusted-host process prerequisites without allocating sandboxes, pulling images, or installing software.
+- Probe Docker, Podman, or trusted-host prerequisites without allocating sandboxes, pulling images, or installing software.
 
 ## Prerequisites
 
 - Node.js 22.12 or newer
-- A reachable Docker daemon
-- Registry access for the first image pull
+- A reachable Docker daemon for the default Vercel-compatible composition, or a reachable Podman API service for an explicitly constructed `PodmanBackend`
+- Registry access for the first OCI image pull
 
 ## Installation
 
@@ -31,7 +31,7 @@ See [ROADMAP.md](ROADMAP.md) for planned compatibility frontends, isolation back
 pnpm add localbox
 ```
 
-Start Docker before creating a sandbox. Localbox pulls its Vercel-compatible universal image from GHCR on first use and reuses Docker's local cache afterward.
+Start the selected container engine before creating a sandbox. The default Vercel-compatible composition uses Docker. Explicit Podman clients use Podman's Docker-compatible API service. Localbox pulls its Vercel-compatible universal image from GHCR on first use and reuses the selected engine's local cache afterward.
 
 ## Usage
 
@@ -126,7 +126,37 @@ Framework adapters, when a proven bypass requires one, are optional toolchain in
 
 ## API reference
 
-Application code continues to use `localbox/vercel` exactly as it did in v0.2. The runtime package exports the transport-safe `SandboxClient` contract, `EmbeddedSandboxClient`, backend interface, `DockerBackend`, and opt-in `ProcessBackend`. The default application composition remains an embedded client bound to one Docker backend. Vercel runtime/image selectors are resolved by the frontend to one OCI boot artifact before that boundary; they are never backend fallback instructions. See [RUNTIME.md](RUNTIME.md) for the artifact schema, availability diagnostics, state migration, command/filesystem ownership, capability-driven conformance profiles, and construction details.
+Application code continues to use `localbox/vercel` exactly as it did in v0.2. The runtime package exports the transport-safe `SandboxClient` contract, `EmbeddedSandboxClient`, backend interface, `DockerBackend`, `PodmanBackend`, and opt-in `ProcessBackend` and `BwrapBackend`. The default application composition remains an embedded client bound to one Docker backend. Vercel runtime/image selectors are resolved by the frontend to one OCI boot artifact before that boundary; they are never backend fallback instructions. See [RUNTIME.md](RUNTIME.md) for the artifact schema, availability diagnostics, state migration, command/filesystem ownership, capability-driven conformance profiles, and construction details.
+
+### Podman runtime backend
+
+`PodmanBackend` is an explicit neutral-runtime backend; it does not silently replace the Docker-backed `localbox/vercel` default:
+
+```ts
+import { EmbeddedSandboxClient, PodmanBackend } from "localbox/runtime";
+
+const backend = new PodmanBackend({
+  mode: "rootless",
+  // Optional when the standard socket is used:
+  // socketPath: "/run/user/1000/podman/podman.sock",
+});
+const client = new EmbeddedSandboxClient(backend);
+const availability = await client.probeAvailability({
+  requestId: "podman-prerequisites",
+  deadline: { expiresAt: Date.now() + 5_000 },
+});
+```
+
+The constructor mode is part of the advertised capability contract and must match the service:
+
+| Mode | Default socket | Security/service authority | Resource guarantees |
+| --- | --- | --- | --- |
+| `rootless` (default) | `$XDG_RUNTIME_DIR/podman/podman.sock`, otherwise `/run/user/<uid>/podman/podman.sock` | Podman and container root run inside the invoking user's namespaces; the host kernel is still shared. | CPU and memory requests are rejected before allocation because cgroup delegation is host- and session-dependent. |
+| `rootful` | `/run/podman/podman.sock` | The Podman service has host-root authority; containers still share the host kernel. | Integer vCPU quotas and Localbox's fixed 2 GiB memory per vCPU are supported through the service cgroup hierarchy. |
+
+On systemd Linux, start the matching API socket with `systemctl --user start podman.socket` for rootless mode or `sudo systemctl start podman.socket` for rootful mode. For Podman machine or non-systemd installations, start `podman system service` and pass its absolute Unix socket path. Availability probing calls only the version and information APIs: it verifies that the endpoint is Podman, detects the actual rootless/rootful mode, and reports a mode mismatch without creating a container or pulling an image.
+
+Both modes cover OCI-image lifecycle, exec, bounded filesystem operations, Git/tarball sources, loopback port publication, persistent stop/resume, deadline expiry, and cleanup through the shared container-engine implementation. Interactive PTYs, snapshots, custom network policies, non-loopback exposure, drive mounts, and hostile multi-tenant isolation remain unsupported. A source-backed `deny-all` sandbox has network access while Localbox materializes the source, then Localbox disconnects every attached engine network.
 
 ### Sandbox creation options
 
@@ -148,7 +178,7 @@ Application code continues to use `localbox/vercel` exactly as it did in v0.2. T
 | `onResume` | `(sandbox) => Promise<void>` | - | Runs after Localbox resumes a stopped container. |
 | `signal` | `AbortSignal` | - | Cancels creation. |
 
-Drive mounts, snapshot sources, and snapshot retention options are accepted by the compatibility types but rejected before Docker is contacted because the local backend cannot implement them faithfully.
+Drive mounts, snapshot sources, and snapshot retention options are accepted by the compatibility types but rejected before the selected local container engine is contacted because no current container backend can implement them faithfully.
 
 ### Sandbox
 
@@ -233,12 +263,12 @@ The complete documented `Command` and `FileSystem` method sets in that manifest 
 | --- | --- |
 | Import | Direct imports use `localbox/vercel`; Localbox v0.3.1 can intercept the unchanged `@vercel/sandbox` import only under `localbox --`. |
 | URLs | Exposed ports use loopback URLs; there is no public domain or reverse proxy. |
-| Isolation | Docker containers share the host kernel instead of using microVM isolation. |
+| Isolation | The default Docker backend and explicit Podman backend share the host kernel instead of using microVM isolation. |
 | Persistence | A stopped persistent container retains its writable layer; snapshots are not portable. |
 | User | Commands use the image's default user; managed images run as `ubuntu` with passwordless `sudo`. |
 | Detached commands | Handles and replay buffers exist only in the host Node.js process that created them. |
 | Managed images | Vercel managed-image aliases resolve to images built from the pinned upstream source in [`images/vercel`](images/vercel) and published by the manual [`publish-vercel-images`](.github/workflows/publish-vercel-images.yml) workflow. |
-| Placement | `region` and `failoverRegions` are retained as metadata; Docker execution stays on the local daemon. |
+| Placement | `region` and `failoverRegions` are retained as metadata; execution stays on the selected local engine. |
 
 ## Lifecycle and cleanup
 
@@ -255,15 +285,18 @@ try {
 }
 ```
 
-Inspect managed containers directly when debugging:
+Inspect managed containers directly when debugging, using the engine that owns the sandbox:
 
 ```sh
 docker ps -a --filter label=dev.localbox.name=<sandbox-name>
+podman ps -a --filter label=dev.localbox.name=<sandbox-name>
 ```
 
 ## Security
 
-Localbox is intended for local development and trusted workloads. Docker containers share the host kernel and are not a safe isolation boundary for hostile multi-tenant code. Exposed ports bind only to `127.0.0.1`, and containers run with Docker's `no-new-privileges` security option. Arbitrary OCI references remain supported, but `trust` and `mutability` artifact fields describe provenance expectations; Localbox does not verify a caller's trust assertion, and those values do not strengthen Docker isolation or grant managed-image privileges.
+Localbox is intended for local development and trusted workloads. Docker and Podman containers share the host kernel and are not a safe isolation boundary for hostile multi-tenant code. Exposed ports bind only to `127.0.0.1`, and containers use the engine's `no-new-privileges` security option. Arbitrary OCI references remain supported, but `trust` and `mutability` artifact fields describe provenance expectations; Localbox does not verify a caller's trust assertion, and those values do not strengthen container isolation or grant managed-image privileges.
+
+Rootless Podman reduces service authority: container root is user-namespace root mapped to the invoking account rather than host root. It does not prevent access available to that account or eliminate shared-kernel risk. Rootful Podman and Docker daemons expose a root-authority control socket; anyone who can access that socket should be treated as having equivalent host control. Localbox never mounts the Podman socket into a sandbox, but callers must protect it and the Localbox state root.
 
 `ProcessBackend` executes directly as the current OS user with shared host files, credentials, processes, networking, and resources. Its private workspace is bookkeeping and path containment for Localbox file operations, not a sandbox. Use it only for explicitly trusted single-user code. Directory, disk-image, and snapshot artifacts are modeled for future backends but are not executed today; Localbox makes no portability, upload/storage, VM-isolation, or restore guarantee for them.
 
@@ -272,9 +305,10 @@ Localbox is intended for local development and trusted workloads. Docker contain
 | Error | Action |
 | --- | --- |
 | Docker availability diagnostic | Start Docker, verify the selected context/socket, and grant the current user endpoint access as directed by the diagnostic. |
+| Podman availability diagnostic | Start the matching rootless or rootful API service, verify the absolute socket path, and make the constructor `mode` match the detected service mode. |
 | `UnsupportedImageError` | Use an image containing `node` and `/bin/sh`. |
 | `PortNotExposedError` | Include the TCP port in `Sandbox.create({ ports })`. |
-| Image pull failure | Check the image name, registry access, and Docker credentials. |
+| Image pull failure | Check the image name, registry access, and selected container-engine credentials. |
 | Process availability diagnostic | Use POSIX, configure an absolute non-symlink private root whose nearest existing parent is accessible, and run from a working Node installation. |
 | `LOCALBOX_UNSUPPORTED_RUNTIME` | Switch to Node.js 22.12 or newer and retry. The wrapped command was not launched. |
 | `LOCALBOX_HOOK_SETUP_FAILED` | Inspect the preserved cause, repair the Localbox installation or Node hook configuration, and retry. The application was not started and the provider was not used as a fallback. |
@@ -290,6 +324,7 @@ pnpm build
 pnpm typecheck
 pnpm test:unit
 pnpm test:integration
+LOCALBOX_PODMAN_SOCKET=/absolute/podman.sock LOCALBOX_PODMAN_MODE=rootless pnpm test:podman
 pnpm smoke
 pnpm smoke:interception
 pnpm compatibility:vercel

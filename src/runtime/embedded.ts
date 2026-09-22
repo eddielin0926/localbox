@@ -56,6 +56,7 @@ import type {
   SandboxBackend,
   SandboxClient,
   SandboxErrorDetails,
+  SourceErrorStage,
   SandboxCapabilities,
   SandboxRecord,
   SandboxRequirement,
@@ -95,6 +96,17 @@ const ERROR_DETAIL_TYPES: Record<SandboxErrorDetails["type"], true> = {
   source: true,
   file: true,
   none: true,
+};
+const SOURCE_ERROR_STAGES: Record<SourceErrorStage, true> = {
+  "inspect-container": true,
+  "clear-workspace": true,
+  "prepare-authentication": true,
+  clone: true,
+  initialize: true,
+  "configure-remote": true,
+  fetch: true,
+  checkout: true,
+  extract: true,
 };
 const REQUIREMENT_ISSUE_KINDS: Record<SandboxRequirementIssue["kind"], true> = {
   malformed: true,
@@ -204,6 +216,12 @@ const AVAILABILITY_CODES: Record<AvailabilityDiagnosticCode, true> = {
   DOCKER_SOCKET_NOT_FOUND: true,
   DOCKER_SOCKET_PERMISSION_DENIED: true,
   DOCKER_DAEMON_UNREACHABLE: true,
+  PODMAN_SERVICE_AVAILABLE: true,
+  PODMAN_SOCKET_NOT_FOUND: true,
+  PODMAN_SOCKET_PERMISSION_DENIED: true,
+  PODMAN_SERVICE_UNREACHABLE: true,
+  PODMAN_ENGINE_MISMATCH: true,
+  PODMAN_MODE_MISMATCH: true,
   PROCESS_PREREQUISITES_AVAILABLE: true,
   PROCESS_PLATFORM_UNSUPPORTED: true,
   PROCESS_ROOT_INVALID: true,
@@ -227,6 +245,15 @@ const DOCKER_AVAILABILITY_REASONS: Partial<Record<AvailabilityDiagnosticCode, st
   DOCKER_SOCKET_NOT_FOUND: "not-found",
   DOCKER_SOCKET_PERMISSION_DENIED: "permission-denied",
   DOCKER_DAEMON_UNREACHABLE: "unreachable",
+};
+
+const PODMAN_AVAILABILITY_REASONS: Partial<Record<AvailabilityDiagnosticCode, string>> = {
+  PODMAN_SERVICE_AVAILABLE: "available",
+  PODMAN_SOCKET_NOT_FOUND: "not-found",
+  PODMAN_SOCKET_PERMISSION_DENIED: "permission-denied",
+  PODMAN_SERVICE_UNREACHABLE: "unreachable",
+  PODMAN_ENGINE_MISMATCH: "engine-mismatch",
+  PODMAN_MODE_MISMATCH: "mode-mismatch",
 };
 
 const PROCESS_AVAILABILITY_PREREQUISITES:
@@ -253,6 +280,7 @@ function isAvailabilityDiagnostic(value: unknown): value is AvailabilityDiagnost
       !isPlainObject(value.details)) return false;
   const details = value.details;
   const info = value.code === "DOCKER_DAEMON_AVAILABLE" ||
+    value.code === "PODMAN_SERVICE_AVAILABLE" ||
     value.code === "PROCESS_PREREQUISITES_AVAILABLE" ||
     value.code === "BWRAP_PREREQUISITES_AVAILABLE";
   const warning = value.code === "BWRAP_APPARMOR_RESTRICTED" &&
@@ -266,6 +294,21 @@ function isAvailabilityDiagnostic(value: unknown): value is AvailabilityDiagnost
       details.type === "docker-daemon" &&
       details.reason === dockerReason &&
       (details.apiVersion === null || typeof details.apiVersion === "string");
+  }
+  const podmanReason = PODMAN_AVAILABILITY_REASONS[
+    value.code as AvailabilityDiagnosticCode
+  ];
+  if (podmanReason !== undefined) {
+    const modeIsValid = details.mode === null ||
+      details.mode === "rootless" || details.mode === "rootful";
+    const modeIsRequired = podmanReason === "available" ||
+      podmanReason === "mode-mismatch";
+    return hasExactKeys(details, ["type", "reason", "apiVersion", "mode"]) &&
+      details.type === "podman-service" &&
+      details.reason === podmanReason &&
+      (details.apiVersion === null || typeof details.apiVersion === "string") &&
+      modeIsValid &&
+      (modeIsRequired ? details.mode !== null : details.mode === null);
   }
   if (value.code === "BWRAP_PLATFORM_UNSUPPORTED") {
     return hasExactKeys(details, ["type", "platform"]) &&
@@ -385,7 +428,18 @@ function isErrorDetails(value: unknown): value is SandboxErrorDetails {
     case "backend":
       return typeof value.operation === "string";
     case "source":
-      return value.sourceType === "git" || value.sourceType === "tarball";
+      return (
+        (value.sourceType === "git" || value.sourceType === "tarball") &&
+        (value.stage === undefined ||
+          typeof value.stage === "string" &&
+          Object.hasOwn(SOURCE_ERROR_STAGES, value.stage)) &&
+        (value.exitCode === undefined ||
+          value.exitCode === null ||
+          Number.isSafeInteger(value.exitCode)) &&
+        (value.diagnostic === undefined ||
+          value.diagnostic === null ||
+          typeof value.diagnostic === "string")
+      );
     case "file":
       return (
         (value.code === null || typeof value.code === "string") &&
@@ -645,6 +699,7 @@ interface RuntimeProcess {
   readonly completion: Promise<ProcessOutcome>;
   readonly resolveCompletion: (outcome: ProcessOutcome) => void;
   readonly signals: Map<ProcessSignal, Promise<void>>;
+  deletion?: Promise<boolean>;
   retainedBytes: number;
   truncated: boolean;
   version: number;
@@ -837,7 +892,12 @@ async function consumeRawCommand(state: RuntimeProcess): Promise<void> {
         retainOutput(state, event);
         continue;
       }
-      settleProcess(state, event);
+      if (event.type === "backend-failure" && state.deletion !== undefined) {
+        const deleted = await state.deletion;
+        settleProcess(state, deleted ? { type: "deleted" } : event);
+      } else {
+        settleProcess(state, event);
+      }
       return;
     }
     settleProcess(state, {
@@ -1233,8 +1293,19 @@ export class EmbeddedSandboxClient implements SandboxClient {
       } catch {
         return stateFailure(request, this.backendReference, "inspectDeleteOwnership");
       }
+      const deletion = Promise.withResolvers<boolean>();
+      const deleting: RuntimeProcess[] = [];
+      for (const state of this.#processes.values()) {
+        if (state.sandboxId !== request.sandboxId || state.deletion !== undefined) continue;
+        state.deletion = deletion.promise;
+        deleting.push(state);
+      }
       const result = await this.#invoke("deleteSandbox", request);
+      deletion.resolve(result.ok);
       if (!result.ok) {
+        for (const state of deleting) {
+          if (state.deletion === deletion.promise) delete state.deletion;
+        }
         if (result.error.category === "not-found") await this.#cleanupAbsent(request.sandboxId);
         return result;
       }
