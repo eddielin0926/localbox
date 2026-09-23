@@ -4,7 +4,7 @@ import type {
   ProcessRecord,
   ReadCommandOutputResult,
   SandboxClient,
-} from "../runtime/index.js";
+} from "../../runtime/index.js";
 import {
   abortError,
   mutationMetadata,

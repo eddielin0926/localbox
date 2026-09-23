@@ -35,8 +35,8 @@
   "packageManager": "pnpm@12.3.4",
   "exports": {
     "./vercel": {
-      "types": "./dist/vercel/index.d.ts",
-      "import": "./dist/vercel/index.js"
+      "types": "./dist/frontend/vercel/index.d.ts",
+      "import": "./dist/frontend/vercel/index.js"
     },
     "./frontend": {
       "types": "./dist/frontend/index.d.ts",
@@ -70,10 +70,10 @@
     "prepack": "pnpm build",
     "build": "node --eval \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && node --eval \"require('node:fs').chmodSync('dist/cli.js',0o755)\"",
     "typecheck": "tsc -p tsconfig.json",
-    "test:unit": "vitest run test/unit",
+    "test:unit": "vitest run test/unit test/frontend/*/unit",
     "test:resolution": "vitest run test/package/node-resolution-hook.test.ts",
     "test:cli": "vitest run test/package/cli-process-wrapper.test.ts",
-    "test:integration": "vitest run test/integration",
+    "test:integration": "vitest run test/integration test/frontend/*/integration",
     "test:podman": "vitest run test/unit/podman-backend.test.ts test/integration/podman-conformance.test.ts",
     "test:process": "vitest run test/process",
     "test:bwrap": "vitest run test/bwrap",

@@ -128,7 +128,7 @@ describe("frontend compatibility manifests", () => {
       package: "@vercel/sandbox",
       version: "3.3.0",
       documentation: "https://vercel.com/docs/sandbox/sdk-reference",
-      assessed: "2026-09-22",
+      assessed: "2026-09-16",
     });
     expect(renderTextCompatibilityReport(one)).toContain(
       "Upstream: @vercel/sandbox@3.3.0",

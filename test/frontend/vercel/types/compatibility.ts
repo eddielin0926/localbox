@@ -9,11 +9,11 @@ import type {
   CommandFinished as LocalCommandFinished,
   FileSystem as LocalFileSystem,
   Sandbox as LocalSandbox,
-} from "../../src/vercel/index.js";
+} from "../../../../src/frontend/vercel/index.js";
 import type {
   SandboxRecord as RuntimeSandboxRecord,
   SandboxSpec as RuntimeSandboxSpec,
-} from "../../src/runtime/index.js";
+} from "../../../../src/runtime/index.js";
 
 type Assert<T extends true> = T;
 

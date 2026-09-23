@@ -3,6 +3,10 @@ import * as localFs from "node:fs/promises";
 import { dirname, resolve as resolveLocalPath } from "node:path";
 import { posix } from "node:path";
 import { Readable } from "node:stream";
+import {
+  resolveFrontendSandboxClient,
+  type FrontendSandboxClientSource,
+} from "../index.js";
 import type {
   BootArtifact,
   ClientResult,
@@ -12,10 +16,9 @@ import type {
   SandboxRequirement,
   SandboxSource as RuntimeSandboxSource,
   StartCommandResult,
-} from "../runtime/index.js";
+} from "../../runtime/index.js";
 import { Command, type CommandRunOptions, CommandFinished, createCommand } from "./command.js";
 import {
-  createSandboxClient,
   mutationMetadata,
   requestMetadata,
   throwIfAborted,
@@ -245,18 +248,19 @@ function sandboxPaginator(items: SandboxListItem[], limit: number, start: number
   };
 }
 
-export class Sandbox {
+export class VercelSandbox {
+  protected static clientSource: FrontendSandboxClientSource | undefined;
   readonly #client: SandboxClient;
-  readonly #onResume: ((sandbox: Sandbox) => Promise<void>) | undefined;
+  readonly #onResume: ((sandbox: VercelSandbox) => Promise<void>) | undefined;
   #record: SandboxRecord;
   #deleted = false;
   #resumePromise: Promise<void> | undefined;
   readonly fs: FileSystem;
 
-  private constructor(
+  protected constructor(
     client: SandboxClient,
     record: SandboxRecord,
-    onResume?: (sandbox: Sandbox) => Promise<void>,
+    onResume?: (sandbox: VercelSandbox) => Promise<void>,
   ) {
     this.#client = client;
     this.#record = record;
@@ -266,6 +270,26 @@ export class Sandbox {
       record.sandboxId,
       async (signal) => this.#ensureRunning(signal),
     );
+  }
+
+  protected static async resolveClient(): Promise<SandboxClient> {
+    if (this.clientSource === undefined) {
+      throw new TypeError("A SandboxClient or factory is required to bind the Vercel frontend.");
+    }
+    return resolveFrontendSandboxClient(this.clientSource);
+  }
+
+  protected static createInstance(
+    client: SandboxClient,
+    record: SandboxRecord,
+    onResume?: (sandbox: VercelSandbox) => Promise<void>,
+  ): VercelSandbox {
+    const Constructor = this as unknown as new (
+      client: SandboxClient,
+      record: SandboxRecord,
+      onResume?: (sandbox: VercelSandbox) => Promise<void>,
+    ) => VercelSandbox;
+    return new Constructor(client, record, onResume);
   }
 
   get name(): string {
@@ -339,7 +363,7 @@ export class Sandbox {
     if (!Number.isInteger(start) || start < 0) {
       throw new InvalidSandboxOptionsError("Sandbox list cursor is invalid.");
     }
-    const client = createSandboxClient();
+    const client = await this.resolveClient();
     const result = unwrap(await withAbort(client.listSandboxes({
       ...requestMetadata(),
       namePrefix: options.namePrefix ?? null,
@@ -353,9 +377,9 @@ export class Sandbox {
     return sandboxPaginator(result.sandboxes.map(listItem), limit, start);
   }
 
-  static async create(options: SandboxCreateOptions = {}): Promise<Sandbox> {
+  static async create(options: SandboxCreateOptions = {}): Promise<VercelSandbox> {
     const normalized = normalizeCreateOptions(options);
-    const client = createSandboxClient();
+    const client = await this.resolveClient();
     const operation = client.createSandbox({
       ...mutationMetadata(),
       sandboxId: normalized.name,
@@ -379,7 +403,7 @@ export class Sandbox {
     });
     try {
       const result = unwrap(await withAbort(operation, options.signal));
-      return new Sandbox(client, result.sandbox, options.onResume);
+      return this.createInstance(client, result.sandbox, options.onResume);
     } catch (error) {
       if (options.signal?.aborted) {
         void operation.then(async (result) => {
@@ -394,15 +418,15 @@ export class Sandbox {
     }
   }
 
-  static async get(options: SandboxGetOptions): Promise<Sandbox> {
+  static async get(options: SandboxGetOptions): Promise<VercelSandbox> {
     throwIfAborted(options.signal);
-    const client = createSandboxClient();
+    const client = await this.resolveClient();
     const initial = unwrap(await withAbort(client.getSandbox({
       ...mutationMetadata(),
       sandboxId: options.name,
       resume: false,
     }), options.signal));
-    const sandbox = new Sandbox(client, initial.sandbox, options.onResume);
+    const sandbox = this.createInstance(client, initial.sandbox, options.onResume);
     if ((options.resume ?? false) && initial.sandbox.status !== "running") {
       const resumed = unwrap(await withAbort(client.getSandbox({
         ...mutationMetadata(),
@@ -422,11 +446,11 @@ export class Sandbox {
     return sandbox;
   }
 
-  static async getOrCreate(options: SandboxGetOrCreateOptions): Promise<Sandbox> {
+  static async getOrCreate(options: SandboxGetOrCreateOptions): Promise<VercelSandbox> {
     throwIfAborted(options.signal);
     if (options.name !== undefined) {
       try {
-        return await Sandbox.get({
+        return await this.get({
           name: options.name,
           ...(options.resume === undefined ? {} : { resume: options.resume }),
           ...(options.onResume === undefined ? {} : { onResume: options.onResume }),
@@ -437,7 +461,7 @@ export class Sandbox {
       }
     }
     try {
-      const sandbox = await Sandbox.create(options);
+      const sandbox = await this.create(options);
       if (options.onCreate !== undefined) {
         try {
           await options.onCreate(sandbox);
@@ -449,7 +473,7 @@ export class Sandbox {
       return sandbox;
     } catch (error) {
       if (!(error instanceof SandboxAlreadyExistsError) || options.name === undefined) throw error;
-      return Sandbox.get({
+      return this.get({
         name: options.name,
         ...(options.resume === undefined ? {} : { resume: options.resume }),
         ...(options.onResume === undefined ? {} : { onResume: options.onResume }),
@@ -688,4 +712,13 @@ export class Sandbox {
   #assertUsable(): void {
     if (this.#deleted) throw new SandboxDeletedError(this.name);
   }
+}
+
+/** Bind the Vercel compatibility facade to one explicit neutral runtime client source. */
+export function createVercelSandboxClass(
+  source: FrontendSandboxClientSource,
+): typeof VercelSandbox {
+  return class Sandbox extends VercelSandbox {
+    protected static override clientSource = source;
+  };
 }

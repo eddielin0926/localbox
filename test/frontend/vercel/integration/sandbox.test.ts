@@ -6,8 +6,8 @@ import {
   MANAGED_IMAGES,
   Sandbox,
   SandboxNotFoundError,
-} from "../../src/vercel/index.js";
-import { dockerContainerName } from "../../src/backends/docker/sandbox.js";
+} from "../../../../src/frontend/vercel/index.js";
+import { dockerContainerName } from "../../../../src/backends/docker/sandbox.js";
 
 const docker = new Dockerode();
 const ownedNames = new Set<string>();

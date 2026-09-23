@@ -8,18 +8,19 @@
     "package": "@vercel/sandbox",
     "version": "3.3.0",
     "documentation": "https://vercel.com/docs/sandbox/sdk-reference",
-    "assessed": "2026-09-22",
+    "assessed": "2026-09-16",
     "scope": "Named, non-deprecated public methods in the published TypeScript declarations; constructors and serialization protocol symbols are excluded."
   },
   "notes": [
     "Frontend support describes the observable local provider contract and is independent of backend capability classifications.",
     "Cloud control-plane inputs with no local semantic effect are not applicable; requested observable behavior that Localbox cannot honor is unsupported.",
+    "Snapshots, forks, hosted sessions, users and groups, interactive terminals, drive mounts, custom network policies, and post-create resource updates remain explicit unsupported differences.",
     "Vercel runtime and image aliases resolve through the shared schema-v1 artifact mapping contract without changing public exports, concrete OCI references, metadata, or default Docker composition."
   ],
   "publicSurfaces": ["Sandbox", "Command", "FileSystem"],
   "entries": [
     { "surface": "Sandbox", "name": "Sandbox.list", "support": "partial", "types": "partial", "behavior": "partial", "rationale": "Local pagination and Docker metadata are available; Vercel credentials and hosted control-plane filters have no local effect." },
-    { "surface": "Sandbox", "name": "Sandbox.create", "support": "partial", "types": "compatible", "behavior": "partial", "rationale": "Localbox maps supported resources, sources, tags, placement metadata, callbacks, and allow-all or deny-all networking, and rejects unsupported cloud capabilities." },
+    { "surface": "Sandbox", "name": "Sandbox.create", "support": "partial", "types": "compatible", "behavior": "partial", "rationale": "Localbox maps supported resources, sources, tags, placement metadata, callbacks, and allow-all or deny-all networking; drive mounts, snapshot retention, and custom policies are rejected before client allocation." },
     { "surface": "Sandbox", "name": "Sandbox.get", "support": "partial", "types": "partial", "behavior": "partial", "rationale": "Named local sandbox records replace Vercel control-plane sandbox lookup." },
     { "surface": "Sandbox", "name": "Sandbox.getOrCreate", "support": "partial", "types": "partial", "behavior": "partial", "rationale": "Creation and resume callbacks are preserved for the local lifecycle without Vercel control-plane state." },
     { "surface": "Sandbox", "name": "Sandbox.fork", "support": "unsupported", "types": "incompatible", "behavior": "incompatible", "rationale": "Localbox has no portable sandbox clone or snapshot source that can preserve fork behavior." },
@@ -34,7 +35,7 @@
     { "surface": "Sandbox", "name": "sandbox.domain", "support": "partial", "types": "compatible", "behavior": "partial", "rationale": "The returned endpoint is a loopback HTTP URL rather than a public Vercel domain." },
     { "surface": "Sandbox", "name": "sandbox.currentSession", "support": "unsupported", "types": "incompatible", "behavior": "incompatible", "rationale": "Local execution has no Vercel session identity or hosted session lifecycle." },
     { "surface": "Sandbox", "name": "sandbox.stop", "support": "partial", "types": "incompatible", "behavior": "partial", "rationale": "Localbox stops the sandbox but does not return Vercel CPU, network, or snapshot metadata." },
-    { "surface": "Sandbox", "name": "sandbox.update", "support": "unsupported", "types": "incompatible", "behavior": "incompatible", "rationale": "Localbox cannot honor hosted resource, network, or isolation updates after sandbox creation." },
+    { "surface": "Sandbox", "name": "sandbox.update", "support": "unsupported", "types": "incompatible", "behavior": "incompatible", "rationale": "Localbox cannot honor hosted resource, network, timeout, environment, or isolation updates after sandbox creation." },
     { "surface": "Sandbox", "name": "sandbox.delete", "support": "native", "types": "compatible", "behavior": "compatible" },
     { "surface": "Sandbox", "name": "sandbox.listSessions", "support": "unsupported", "types": "incompatible", "behavior": "incompatible", "rationale": "Local execution does not create hosted sessions that can be listed." },
     { "surface": "Sandbox", "name": "sandbox.listSnapshots", "support": "unsupported", "types": "incompatible", "behavior": "incompatible", "rationale": "The current runtime cannot create or enumerate portable snapshots." },

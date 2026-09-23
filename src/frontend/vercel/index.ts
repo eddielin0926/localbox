@@ -1,3 +1,9 @@
+import { createDefaultSandboxClient } from "../../default-client.js";
+import { createVercelSandboxClass } from "./sandbox.js";
+
+/** Vercel-compatible facade bound at the package boundary to Localbox's default client. */
+export class Sandbox extends createVercelSandboxClass(createDefaultSandboxClient) {}
+
 export { Command, CommandFinished } from "./command.js";
 export type {
   CommandChunk,
@@ -30,12 +36,11 @@ export type {
   FileRenameOptions,
   FileWriteOptions,
 } from "./filesystem.js";
-export { Sandbox } from "./sandbox.js";
 export {
   MANAGED_IMAGES,
   MANAGED_IMAGE_REGISTRY,
   MANAGED_IMAGE_UPSTREAM_COMMIT,
-} from "../runtime/index.js";
+} from "../vercel-managed-images.js";
 export type {
   NetworkPolicy,
   NetworkPolicyKeyValueMatcher,

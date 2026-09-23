@@ -1,21 +1,21 @@
-import { afterEach, describe, expect, test } from "vitest";
-import type { RequestMetadata, SandboxClient } from "../../src/runtime/index.js";
-import { setSandboxClientFactory } from "../../src/vercel/client.js";
+import { describe, expect, test } from "vitest";
+import type { RequestMetadata, SandboxClient } from "../../../../src/runtime/index.js";
+import { createVercelSandboxClass } from "../../../../src/frontend/vercel/sandbox.js";
 import {
   DockerUnavailableError,
   ImagePullError,
   InvalidSandboxOptionsError,
   PortNotExposedError,
-  Sandbox,
   SandboxNotFoundError,
   UnsupportedImageError,
   UnsupportedSandboxCapabilityError,
-} from "../../src/vercel/index.js";
-import type { SandboxCreateOptions } from "../../src/vercel/types.js";
-import { resolveSandboxPath } from "../../src/vercel/filesystem.js";
+} from "../../../../src/frontend/vercel/index.js";
+import type { SandboxCreateOptions } from "../../../../src/frontend/vercel/types.js";
+import { resolveSandboxPath } from "../../../../src/frontend/vercel/filesystem.js";
 
 const rejectingClient = new Proxy({}, {
-  get() {
+  get(_target, property) {
+    if (property === "then") return undefined;
     return (request: RequestMetadata) => Promise.resolve({
       ok: false as const,
       error: {
@@ -35,13 +35,10 @@ const rejectingClient = new Proxy({}, {
   },
 }) as SandboxClient;
 
-afterEach(() => {
-  setSandboxClientFactory(null);
-});
 
 describe("sandbox option validation", () => {
   test("translates frontend and client-boundary validation failures consistently", async () => {
-    setSandboxClientFactory(() => rejectingClient);
+    const Sandbox = createVercelSandboxClass(() => rejectingClient);
     const invalidOptions = [
       { name: "   " },
       { name: "x".repeat(129) },
@@ -75,7 +72,9 @@ describe("sandbox option validation", () => {
   });
 
   test("rejects unsupported upstream capabilities before constructing a client", async () => {
-    setSandboxClientFactory(() => { throw new Error("client factory must not be called"); });
+    const Sandbox = createVercelSandboxClass(() => {
+      throw new Error("client factory must not be called");
+    });
     const unsupportedOptions = [
       { source: { type: "snapshot", snapshotId: "snap_123" } },
       { mounts: { "/data": { drive: "drive_123", mode: "read-write" } } },

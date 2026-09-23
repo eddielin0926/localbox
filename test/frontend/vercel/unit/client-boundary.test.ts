@@ -1,5 +1,5 @@
 import { Writable } from "node:stream";
-import { afterEach, describe, expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import type {
   ClientFailure,
   ClientResult,
@@ -10,16 +10,18 @@ import type {
   RequestMetadata,
   SandboxClient,
   SandboxRecord,
-} from "../../src/runtime/index.js";
-import { setSandboxClientFactory } from "../../src/vercel/client.js";
+  StartCommandRequest,
+} from "../../../../src/runtime/index.js";
+import { createVercelSandboxClass } from "../../../../src/frontend/vercel/sandbox.js";
 import {
+  Command,
+  CommandFinished,
   MANAGED_IMAGES,
   LocalboxError,
   PortNotExposedError,
-  Sandbox,
   SandboxAlreadyExistsError,
   SandboxNotFoundError,
-} from "../../src/vercel/index.js";
+} from "../../../../src/frontend/vercel/index.js";
 
 const BACKEND = { backendId: "provider-boundary", backendType: "test" } as const;
 
@@ -59,6 +61,7 @@ class BoundaryClient implements SandboxClient {
   readonly operations: string[] = [];
   readonly createRequests: CreateSandboxRequest[] = [];
   readonly signals: string[] = [];
+  readonly startRequests: StartCommandRequest[] = [];
   #processSequence = 0;
 
   async probeAvailability(
@@ -177,6 +180,7 @@ class BoundaryClient implements SandboxClient {
 
   async startCommand(request: Parameters<SandboxClient["startCommand"]>[0]) {
     this.operations.push("startCommand");
+    this.startRequests.push(request);
     if (request.command.command === "boundary-failure") {
       return failure(request, "backend-failure", "BOUNDARY_COMMAND_FAILED", "process", "none");
     }
@@ -307,14 +311,11 @@ class BoundaryClient implements SandboxClient {
   }
 }
 
-afterEach(() => {
-  setSandboxClientFactory(null);
-});
 
 describe("Vercel compatibility through SandboxClient", () => {
   test("lifecycle, callbacks, persistence, listing, and errors stay behind the client boundary", async () => {
     const client = new BoundaryClient();
-    setSandboxClientFactory(() => client);
+    const Sandbox = createVercelSandboxClass(() => client);
     let created = 0;
     let resumed = 0;
     const sandbox = await Sandbox.getOrCreate({
@@ -356,7 +357,7 @@ describe("Vercel compatibility through SandboxClient", () => {
 
   test("constructs only the typed guarantees required by the supported Vercel surface", async () => {
     const client = new BoundaryClient();
-    setSandboxClientFactory(() => client);
+    const Sandbox = createVercelSandboxClass(() => client);
 
     await Sandbox.create({
       name: "boundary-requirements",
@@ -395,12 +396,30 @@ describe("Vercel compatibility through SandboxClient", () => {
 
   test("commands, callback streams, files, endpoints, timeouts, aborts, and failures are observable client values", async () => {
     const client = new BoundaryClient();
-    setSandboxClientFactory(() => client);
+    const Sandbox = createVercelSandboxClass(() => client);
     const sandbox = await Sandbox.create({
       name: "boundary-behavior",
       ports: [3000],
       timeout: 2_000,
     });
+
+    const detached = await sandbox.runCommand({
+      cmd: "node",
+      args: ["-e", "process.stdout.write('$HOME;echo not-a-shell')"],
+      detached: true,
+    });
+    expect(detached).toBeInstanceOf(Command);
+    expect(detached).not.toBeInstanceOf(CommandFinished);
+    expect(client.startRequests[0]?.command).toEqual({
+      command: "node",
+      arguments: ["-e", "process.stdout.write('$HOME;echo not-a-shell')"],
+      cwd: "/vercel/sandbox",
+      environment: {},
+    });
+    const detachedFinished = await detached.wait();
+    expect(detachedFinished).toBeInstanceOf(CommandFinished);
+    expect(detachedFinished.exitCode).toBe(7);
+    expect(await detached.output()).toBe("client stdoutclient stderr");
 
     const stdout: string[] = [];
     const stderr: string[] = [];
