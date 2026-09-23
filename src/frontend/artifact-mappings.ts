@@ -265,7 +265,9 @@ function artifactIdentity(artifact: BootArtifact): string {
 }
 
 function artifactDigest(artifact: BootArtifact): string | null {
-  if (!("digest" in artifact) || artifact.digest === null) return null;
+  if (artifact.kind === "host" || artifact.kind === "directory" || artifact.digest === null) {
+    return null;
+  }
   return `${artifact.digest.algorithm}:${artifact.digest.value}`;
 }
 
