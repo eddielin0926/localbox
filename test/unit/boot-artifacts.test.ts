@@ -4,7 +4,7 @@ import {
   validateSandboxFrontendMetadata,
   type BootArtifact,
 } from "../../src/runtime/index.js";
-import { MANAGED_IMAGES } from "../../src/backends/docker/managed-images.js";
+import { MANAGED_IMAGES } from "../../src/frontend/vercel-managed-images.js";
 import { resolveVercelBootArtifact } from "../../src/vercel/boot-artifact.js";
 
 const artifacts = [
@@ -142,6 +142,16 @@ describe("boot artifact contract", () => {
         digest: { algorithm: "sha256", value: "c".repeat(64) },
         trust: "untrusted",
         mutability: "immutable",
+      },
+    });
+    const sha512 = `registry.example.test/team/app@sha512:${"d".repeat(128)}`;
+    expect(resolveVercelBootArtifact({ image: sha512 })).toMatchObject({
+      ok: true,
+      artifact: {
+        locator: { reference: sha512 },
+        digest: null,
+        trust: "untrusted",
+        mutability: "mutable",
       },
     });
   });

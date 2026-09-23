@@ -4,6 +4,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const schemaUrl = new URL("../src/frontend/compatibility-manifest.schema.json", import.meta.url);
 export const manifestDirectoryUrl = new URL("../src/frontend/manifests/", import.meta.url);
+export const artifactMappingManifestUrl = new URL(
+  "../src/frontend/artifact-mapping-manifest.json",
+  import.meta.url,
+);
 
 function objectAt(value, path) {
   if (value === null || Array.isArray(value) || typeof value !== "object") {
@@ -192,8 +196,78 @@ export function validateCompatibilityManifest(manifestValue, schemaValue) {
   return manifest;
 }
 
+/** Validate the shared provider-artifact policy against schema-v1 classifications. */
+export function validateArtifactMappingManifest(manifestValue, schemaValue) {
+  const schema = objectAt(schemaValue, "Compatibility schema");
+  const manifest = objectAt(manifestValue, "Artifact mapping manifest");
+  exactKeys(
+    manifest,
+    ["$schema", "schemaVersion", "policy", "entries"],
+    [],
+    "Artifact mapping manifest",
+  );
+  if (
+    manifest.$schema !==
+      "./compatibility-manifest.schema.json#/$defs/artifactMappingManifest"
+  ) {
+    throw new Error("Artifact mapping manifest must reference the shared compatibility schema.");
+  }
+  if (manifest.schemaVersion !== schema?.properties?.schemaVersion?.const) {
+    throw new Error(`Unknown artifact mapping schema version: ${String(manifest.schemaVersion)}.`);
+  }
+
+  const policy = objectAt(manifest.policy, "Artifact mapping manifest policy");
+  exactKeys(policy, ["issue", "url"], [], "Artifact mapping manifest policy");
+  if (policy.issue !== 64) throw new Error("Artifact mapping manifest policy must link issue #64.");
+  const policyUrl = nonEmptyString(policy.url, "Artifact mapping manifest policy URL");
+  try {
+    new URL(policyUrl);
+  } catch {
+    throw new Error("Artifact mapping manifest policy URL must be absolute.");
+  }
+
+  if (!Array.isArray(manifest.entries) || manifest.entries.length === 0) {
+    throw new Error("Artifact mapping manifest entries must be a non-empty array.");
+  }
+  const contracts = new Set(
+    schema?.$defs?.artifactMappingEntry?.properties?.contract?.enum ?? [],
+  );
+  const supportValues = new Set(schemaValues(schema, "support"));
+  const seen = new Set();
+  for (const [index, entryValue] of manifest.entries.entries()) {
+    const path = `Artifact mapping manifest entries[${index}]`;
+    const entry = objectAt(entryValue, path);
+    exactKeys(entry, ["contract", "selector", "support", "rationale"], [], path);
+    if (!contracts.has(entry.contract)) {
+      throw new Error(`Unknown artifact mapping contract: ${String(entry.contract)}.`);
+    }
+    const selector = nonEmptyString(entry.selector, `${path}.selector`);
+    if (!supportValues.has(entry.support)) {
+      throw new Error(`Unknown artifact mapping support for ${selector}: ${String(entry.support)}.`);
+    }
+    nonEmptyString(entry.rationale, `${path}.rationale`);
+    const key = `${entry.contract}\0${selector}`;
+    if (seen.has(key)) {
+      throw new Error(`Duplicate artifact mapping entry: ${entry.contract} ${selector}.`);
+    }
+    seen.add(key);
+  }
+  return manifest;
+}
+
 export async function loadCompatibilitySchema(url = schemaUrl) {
   return JSON.parse(await readFile(url, "utf8"));
+}
+
+export async function loadArtifactMappingManifest({
+  url = artifactMappingManifestUrl,
+  schema = undefined,
+} = {}) {
+  const compatibilitySchema = schema ?? await loadCompatibilitySchema();
+  return validateArtifactMappingManifest(
+    JSON.parse(await readFile(url, "utf8")),
+    compatibilitySchema,
+  );
 }
 
 export async function loadCompatibilityManifests({
@@ -344,13 +418,45 @@ function summarizeEntries(entries, supportValues, compatibilityValues) {
   };
 }
 
+function summarizeSupportEntries(entries, supportValues) {
+  const support = emptyCounts(supportValues);
+  for (const entry of entries) support[entry.support] += 1;
+  return {
+    total: entries.length,
+    supported: support.native + support.emulated + support.partial,
+    support,
+  };
+}
+
 /** Build a deterministic JSON-safe report for one or more validated manifests. */
-export function createCompatibilityReport(manifests, declarationChecks, schema) {
+export function createCompatibilityReport(
+  manifests,
+  declarationChecks,
+  schema,
+  artifactMappingManifest = null,
+) {
   const supportValues = schemaValues(schema, "support");
   const compatibilityValues = schemaValues(schema, "compatibility");
   const ordered = [...manifests].sort((left, right) => left.frontend.localeCompare(right.frontend));
+  const artifactMappings = artifactMappingManifest === null
+    ? null
+    : {
+      policy: artifactMappingManifest.policy,
+      contracts: [...new Set(
+        artifactMappingManifest.entries.map(({ contract }) => contract),
+      )].sort().map((contract) => ({
+        contract,
+        entries: artifactMappingManifest.entries.filter((entry) => entry.contract === contract),
+        total: summarizeSupportEntries(
+          artifactMappingManifest.entries.filter((entry) => entry.contract === contract),
+          supportValues,
+        ),
+      })),
+      total: summarizeSupportEntries(artifactMappingManifest.entries, supportValues),
+    };
   return {
     schemaVersion: schema.properties.schemaVersion.const,
+    artifactMappings,
     frontends: ordered.map((manifest) => {
       const surfaces = manifest.publicSurfaces.map((surface) => ({
         surface,
@@ -380,8 +486,20 @@ function ratio(value, total) {
 
 export function renderTextCompatibilityReport(report) {
   const lines = [];
+  if (report.artifactMappings !== null) {
+    const mappings = report.artifactMappings;
+    lines.push("Shared provider artifact mappings");
+    lines.push(`Policy: #${mappings.policy.issue} ${mappings.policy.url}`);
+    lines.push("Contract                             Total Native Emulated Partial N/A Unsupported Supported");
+    for (const contract of [...mappings.contracts, { contract: "Total", total: mappings.total }]) {
+      const summary = contract.total;
+      lines.push(
+        `${contract.contract.padEnd(36)} ${String(summary.total).padStart(5)} ${String(summary.support.native).padStart(6)} ${String(summary.support.emulated).padStart(8)} ${String(summary.support.partial).padStart(7)} ${String(summary.support["not-applicable"]).padStart(3)} ${String(summary.support.unsupported).padStart(11)} ${ratio(summary.supported, summary.total)}`,
+      );
+    }
+  }
   for (const [index, frontend] of report.frontends.entries()) {
-    if (index > 0) lines.push("");
+    if (lines.length > 0 || index > 0) lines.push("");
     lines.push(`${frontend.displayName} compatibility (${frontend.contract})`);
     lines.push(`Upstream: ${frontend.upstream.package}@${frontend.upstream.version}`);
     lines.push(`Documentation: ${frontend.upstream.documentation}`);

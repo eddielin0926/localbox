@@ -237,3 +237,26 @@ export interface FrontendCommandConformance<Completion, ProcessHandle> {
   execute(input: FrontendCommandInput): Promise<FrontendCommandCompletion<Completion>>;
   start(input: FrontendCommandInput): Promise<FrontendLiveProcess<ProcessHandle>>;
 }
+
+export {
+  CLOUDFLARE_NEXT_IMAGE_ALIASES,
+  CLOUDFLARE_STABLE_IMAGE_ALIASES,
+  FRONTEND_ARTIFACT_CONTRACTS,
+  FRONTEND_ARTIFACT_MAPPING_SCHEMA_VERSION,
+  resolveFrontendBootArtifact,
+} from "./artifact-mappings.js";
+export type {
+  CloudflareNextArtifactSelection,
+  CloudflareStableArtifactSelection,
+  DaytonaArtifactSelection,
+  E2BArtifactSelection,
+  FrontendArtifactContract,
+  FrontendArtifactMappingError,
+  FrontendArtifactMappingErrorCategory,
+  FrontendArtifactMappingIdentity,
+  FrontendArtifactMappingOptions,
+  FrontendArtifactMappingProvenance,
+  FrontendArtifactResolution,
+  FrontendArtifactSelection,
+  VercelArtifactSelection,
+} from "./artifact-mappings.js";

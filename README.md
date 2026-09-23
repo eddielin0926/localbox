@@ -146,6 +146,22 @@ Compatibility manifests use schema version 1 and exactly these frontend support 
 
 Every non-native entry requires a rationale. Security, isolation, network, resource, storage, snapshot, session, terminal, and hosted control-plane inputs must be classified centrally: unsupported behavior is rejected before client allocation, while not-applicable cloud-only input is explicitly reported rather than counted as support. No provider option may be silently ignored.
 
+### Provider artifact mappings
+
+`localbox/frontend` also exports the schema-v1 `resolveFrontendBootArtifact` contract. It synchronously turns one pinned provider selector into exactly one validated `BootArtifact` before a client factory or `SandboxClient.createSandbox` call can run. The resolution records the original provider/version selector and the concrete local identity, trust, digest, mutability, and provenance for diagnostics; only the concrete artifact is execution input. Unknown, contradictory, private, unavailable, dynamic-build, and capability-incompatible selections return stable data errors instead of selecting a default backend image.
+
+| Contract | Local mapping |
+| --- | --- |
+| `vercel@3.3.0` | Preserves the existing runtime aliases, managed-image aliases, universal default, exact GHCR references, metadata, and public custom-OCI behavior. |
+| `cloudflare@0.12.9` | Maps `default`, `python`, `opencode`, and `musl` only to matching stable images. |
+| `cloudflare@0.13.0-next.769.1` | Maps the same aliases to the separately pinned preview images; stable and preview official tags are mutually incompatible. |
+| `e2b@2.8.0` | Resolves a template ID or name only from an explicit `e2bTemplates` map of validated local OCI artifacts. Hosted lookup and template builds are unsupported. |
+| `daytona@0.216.0` | Accepts public image strings as concrete OCI references. A snapshot resolves only from `daytonaSnapshots` when the selected backend identity and capabilities support local restore. Daytona `Image` builders and hosted default/language snapshots are unsupported. |
+
+Cloudflare and Daytona permit explicit registry image references in their pinned configuration/create contracts; E2B `Sandbox.create` accepts a hosted template identifier, not an OCI reference, so Localbox never interprets an unconfigured E2B template string as an image. Configure `privateRegistryHosts` when composing a frontend so credential-dependent references fail before allocation; credentials are never carried by `BootArtifact` or `SandboxClient`.
+
+The packaged [`artifact-mapping-manifest.json`](src/frontend/artifact-mapping-manifest.json) links every native, partial, not-applicable, and unsupported mapping family to the shared support policy from [#64](https://github.com/eddielin0926/localbox/issues/64). The normal compatibility report includes this shared mapping summary before provider API reports. These mapping contracts do not add `localbox/cloudflare`, `localbox/e2b`, or `localbox/daytona` implementations; those provider frontends remain separate work.
+
 ### Podman runtime backend
 
 `PodmanBackend` is an explicit neutral-runtime backend; it does not silently replace the Docker-backed `localbox/vercel` default:

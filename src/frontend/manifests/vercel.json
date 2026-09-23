@@ -14,7 +14,7 @@
   "notes": [
     "Frontend support describes the observable local provider contract and is independent of backend capability classifications.",
     "Cloud control-plane inputs with no local semantic effect are not applicable; requested observable behavior that Localbox cannot honor is unsupported.",
-    "The existing localbox/vercel implementation and default Docker composition remain unchanged by the shared framework."
+    "Vercel runtime and image aliases resolve through the shared schema-v1 artifact mapping contract without changing public exports, concrete OCI references, metadata, or default Docker composition."
   ],
   "publicSurfaces": ["Sandbox", "Command", "FileSystem"],
   "entries": [

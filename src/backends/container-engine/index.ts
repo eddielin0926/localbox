@@ -2,7 +2,7 @@ import Dockerode from "dockerode";
 import { validateBootArtifact } from "../../runtime/artifacts.js";
 import { FILESYSTEM_TRANSFER_CHUNK_BYTES } from "../../runtime/filesystem-bridge.js";
 import { MANAGED_FILESYSTEM_PRIVILEGE_BRIDGE } from "../../runtime/internal-filesystem-bridge.js";
-import { MANAGED_IMAGE_REGISTRY } from "../docker/managed-images.js";
+import { MANAGED_IMAGE_REGISTRY } from "../../frontend/vercel-managed-images.js";
 import {
   DockerUnavailableError,
   ImagePullError,
