@@ -57,6 +57,7 @@
     "README.md",
     "RUNTIME.md",
     "src/frontend/compatibility-manifest.schema.json",
+    "src/frontend/artifact-mapping-manifest.json",
     "src/frontend/manifests",
     "scripts/compatibility-report.mjs",
     "scripts/report-compatibility.mjs"

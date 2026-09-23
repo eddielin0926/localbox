@@ -1,6 +1,7 @@
 import {
   checkDeclarationDrift,
   createCompatibilityReport,
+  loadArtifactMappingManifest,
   loadCompatibilityManifests,
   loadCompatibilitySchema,
   renderTextCompatibilityReport,
@@ -44,6 +45,7 @@ function parseArguments(arguments_) {
 const options = parseArguments(process.argv.slice(2));
 const schema = await loadCompatibilitySchema();
 const available = await loadCompatibilityManifests({ schema });
+const artifactMappingManifest = await loadArtifactMappingManifest({ schema });
 const manifests = options.frontend === null
   ? available
   : available.filter((manifest) => manifest.frontend === options.frontend);
@@ -61,7 +63,12 @@ const declarationChecks = Object.fromEntries(
     ]),
   ),
 );
-const report = createCompatibilityReport(manifests, declarationChecks, schema);
+const report = createCompatibilityReport(
+  manifests,
+  declarationChecks,
+  schema,
+  artifactMappingManifest,
+);
 process.stdout.write(
   options.json
     ? `${JSON.stringify(report, null, 2)}\n`

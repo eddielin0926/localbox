@@ -79,6 +79,16 @@ Provider option policy covers security, isolation, network, resource, storage, s
 
 Command conformance uses discriminated shapes rather than a universal command bag. `{ kind: "shell", command }` preserves provider-defined shell interpretation; `{ kind: "argv", executable, arguments }` bypasses shell interpretation. Execution returns `{ kind: "completion", completion }`, while start/detach returns `{ kind: "process", process }`. Provider suites exercise those input and outcome semantics independently.
 
+### Artifact resolution before the client boundary
+
+`resolveFrontendBootArtifact` is the single provider-neutral selector boundary. Its contract IDs pin Vercel `3.3.0`, Cloudflare stable `0.12.9`, Cloudflare preview `0.13.0-next.769.1`, E2B `2.8.0`, and Daytona `0.216.0`. Success contains one `BootArtifact` plus diagnostic mapping identity: the upstream selector and qualifiers, and the resolved local kind, locator identity, trust, digest, mutability, and provenance. The mapping identity is not a fallback instruction and is not passed to a backend.
+
+The Cloudflare stable and preview alias objects are deliberately independent and point to exact matching image versions. An official image from the other release line is an incompatible contract, not a custom-image escape hatch. The pinned Vercel and Daytona contracts permit explicit public OCI references; Cloudflare container configuration also permits registry references. E2B creation accepts a template ID/name, so it requires an explicit local template-to-OCI configuration and never parses the template as an image. Dockerfile, E2B Template, and Daytona Image builds remain hosted/dynamic behavior and are rejected.
+
+A configured Daytona snapshot is evidence of local presence, not sufficient authority to run it. Resolution validates the `SnapshotBootArtifact`, matches backend-scoped identity to the selected backend, and negotiates both snapshot artifact acceptance and restore capability. Missing capability data, a different backend identity, unavailable snapshot, or unsupported restore fails synchronously. Registry hosts declared private fail the same pre-allocation path because credentials never cross the artifact or client contract.
+
+The shared artifact mapping manifest uses the compatibility schema's support classifications and links its native, partial, not-applicable, and unsupported entries to issue #64. The generic report renders that mapping summary independently of provider API manifests.
+
 ## Local state and sandbox-name ownership
 
 `resolveLocalStateRoot` uses `$XDG_STATE_HOME/localbox` only when `XDG_STATE_HOME` is an absolute path, as required by the XDG Base Directory specification. An unset, empty, or relative value is ignored and falls back to `<homedir>/.local/state/localbox`. An explicit constructor override must also be absolute. This injection point isolates tests and permits multiple runtime instances to share or intentionally separate ownership domains.

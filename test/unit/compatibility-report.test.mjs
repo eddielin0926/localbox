@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   createCompatibilityReport,
   renderTextCompatibilityReport,
+  validateArtifactMappingManifest,
   validateCompatibilityManifest,
 } from "../../scripts/compatibility-report.mjs";
 
@@ -12,6 +13,10 @@ const schema = JSON.parse(await readFile(
 ));
 const vercelManifest = JSON.parse(await readFile(
   new URL("../../src/frontend/manifests/vercel.json", import.meta.url),
+  "utf8",
+));
+const artifactMappingManifest = JSON.parse(await readFile(
+  new URL("../../src/frontend/artifact-mapping-manifest.json", import.meta.url),
   "utf8",
 ));
 
@@ -25,6 +30,33 @@ describe("frontend compatibility manifests", () => {
   test("accepts the versioned Vercel data manifest", () => {
     expect(validateCompatibilityManifest(structuredClone(vercelManifest), schema)).toEqual(
       vercelManifest,
+    );
+  });
+
+  test("accepts the shared artifact mapping manifest and its #64 policy link", () => {
+    expect(validateArtifactMappingManifest(
+      structuredClone(artifactMappingManifest),
+      schema,
+    )).toEqual(artifactMappingManifest);
+
+    const report = createCompatibilityReport(
+      [vercelManifest],
+      { vercel: declarationStatus(vercelManifest) },
+      schema,
+      artifactMappingManifest,
+    );
+    expect(report.artifactMappings.policy).toEqual({
+      issue: 64,
+      url: "https://github.com/eddielin0926/localbox/issues/64",
+    });
+    expect(report.artifactMappings.total.support).toMatchObject({
+      native: 3,
+      partial: 6,
+      "not-applicable": 3,
+      unsupported: 5,
+    });
+    expect(renderTextCompatibilityReport(report)).toContain(
+      "Shared provider artifact mappings",
     );
   });
 

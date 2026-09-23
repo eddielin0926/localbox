@@ -39,6 +39,8 @@ Provider adapters expose their provider-specific package entry point but compose
 
 Frontend behavior suites reuse the discriminated shell/argv and completion/live-process contracts. Test those four semantics independently, along with option preflight, provider result/error translation, and meaningful differences recorded in the manifest. Keep package exports, published files, the all-frontend report script, README, and runtime documentation in sync when adding a frontend.
 
+Artifact selectors use the exported `resolveFrontendBootArtifact` contract and a pinned provider contract ID. Add aliases to only one provider/version table, preserve an upstream identifier in the mapping identity, and return one strictly validated local `BootArtifact`. Never pass a provider selector, registry credential, dynamic build description, or fallback list into `SandboxClient`. E2B template mappings must be explicit local OCI configuration. Daytona snapshot mappings must name an actually present local snapshot and prove the selected backend identity plus artifact/restore capabilities. Update the shared artifact mapping manifest and report coverage when mapping behavior changes; use the #64 support policy rather than a provider-specific classification.
+
 ## Verification
 
 Run the smallest checks that cover your change:

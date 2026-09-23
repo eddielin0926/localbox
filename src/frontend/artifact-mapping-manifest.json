@@ -1,0 +1,112 @@
+{
+  "$schema": "./compatibility-manifest.schema.json#/$defs/artifactMappingManifest",
+  "schemaVersion": 1,
+  "policy": {
+    "issue": 64,
+    "url": "https://github.com/eddielin0926/localbox/issues/64"
+  },
+  "entries": [
+    {
+      "contract": "vercel@3.3.0",
+      "selector": "runtime and managed-image aliases",
+      "support": "native",
+      "rationale": "Pinned Vercel selectors retain their exact Localbox managed OCI references, trust, metadata, and default universal-image behavior."
+    },
+    {
+      "contract": "vercel@3.3.0",
+      "selector": "explicit public OCI image",
+      "support": "partial",
+      "rationale": "The pinned Vercel API permits custom image names; Localbox preserves the reference as untrusted provenance but does not provide registry authentication."
+    },
+    {
+      "contract": "cloudflare@0.12.9",
+      "selector": "stable default, Python, OpenCode, and musl aliases",
+      "support": "native",
+      "rationale": "Each stable alias resolves only to the exact matching 0.12.9 container image and cannot consume a preview tag."
+    },
+    {
+      "contract": "cloudflare@0.13.0-next.769.1",
+      "selector": "preview default, Python, OpenCode, and musl aliases",
+      "support": "native",
+      "rationale": "Each preview alias resolves only to the exact matching next container image and cannot consume a stable tag."
+    },
+    {
+      "contract": "cloudflare@0.12.9",
+      "selector": "explicit public OCI image",
+      "support": "partial",
+      "rationale": "Wrangler permits registry image references, but Localbox rejects mismatched official release lines, private authentication, and Dockerfile builds."
+    },
+    {
+      "contract": "cloudflare@0.13.0-next.769.1",
+      "selector": "explicit public OCI image",
+      "support": "partial",
+      "rationale": "Wrangler permits registry image references, but Localbox rejects mismatched official release lines, private authentication, and Dockerfile builds."
+    },
+    {
+      "contract": "cloudflare@0.12.9",
+      "selector": "Wrangler deployment and hosted image publication metadata",
+      "support": "not-applicable",
+      "rationale": "Worker deployment identifiers and Cloudflare registry publication metadata do not select or alter a pre-existing local boot artifact."
+    },
+    {
+      "contract": "cloudflare@0.12.9",
+      "selector": "Dockerfile or hosted container build",
+      "support": "unsupported",
+      "rationale": "Localbox does not invoke Wrangler or a hosted build pipeline and requires one concrete OCI artifact before client creation."
+    },
+    {
+      "contract": "cloudflare@0.13.0-next.769.1",
+      "selector": "Dockerfile or hosted container build",
+      "support": "unsupported",
+      "rationale": "Localbox does not invoke Wrangler or a hosted build pipeline and requires one concrete OCI artifact before client creation."
+    },
+    {
+      "contract": "e2b@2.8.0",
+      "selector": "explicitly configured template identifier",
+      "support": "partial",
+      "rationale": "An E2B template resolves only when the same ID or name is configured to a validated local OCI artifact; hosted lookup is never attempted."
+    },
+    {
+      "contract": "e2b@2.8.0",
+      "selector": "hosted template account metadata",
+      "support": "not-applicable",
+      "rationale": "Hosted ownership, billing, and publication metadata have no local artifact-selection effect."
+    },
+    {
+      "contract": "e2b@2.8.0",
+      "selector": "unconfigured template or template build",
+      "support": "unsupported",
+      "rationale": "Hosted template lookup and dynamic Template builds cannot be converted into a local OCI reference without an explicit mapping."
+    },
+    {
+      "contract": "daytona@0.216.0",
+      "selector": "explicit public OCI image string",
+      "support": "partial",
+      "rationale": "The pinned Daytona create overload permits an image string; Localbox accepts the concrete reference but not private authentication or hosted snapshot construction."
+    },
+    {
+      "contract": "daytona@0.216.0",
+      "selector": "configured local snapshot identifier",
+      "support": "partial",
+      "rationale": "A Daytona snapshot resolves only when an actual local snapshot artifact is configured and the selected backend identity and capabilities satisfy restore."
+    },
+    {
+      "contract": "daytona@0.216.0",
+      "selector": "hosted region and snapshot publication metadata",
+      "support": "not-applicable",
+      "rationale": "Hosted placement and publication metadata do not change the identity of an already present local snapshot artifact."
+    },
+    {
+      "contract": "daytona@0.216.0",
+      "selector": "default or language-hosted snapshot and dynamic Image build",
+      "support": "unsupported",
+      "rationale": "Localbox never guesses a hosted default snapshot and does not run Daytona's dynamic image-to-snapshot build pipeline."
+    },
+    {
+      "contract": "vercel@3.3.0",
+      "selector": "private OCI registry authentication",
+      "support": "unsupported",
+      "rationale": "Registry credentials are not accepted by the BootArtifact or SandboxClient boundary and cannot be silently omitted."
+    }
+  ]
+}
