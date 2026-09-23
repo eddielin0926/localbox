@@ -14,7 +14,8 @@ import type { SandboxCreateOptions } from "../../../../src/frontend/vercel/types
 import { resolveSandboxPath } from "../../../../src/frontend/vercel/filesystem.js";
 
 const rejectingClient = new Proxy({}, {
-  get() {
+  get(_target, property) {
+    if (property === "then") return undefined;
     return (request: RequestMetadata) => Promise.resolve({
       ok: false as const,
       error: {
