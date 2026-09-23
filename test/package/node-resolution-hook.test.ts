@@ -72,14 +72,14 @@ beforeAll(async () => {
   await cp(join(fixtureDirectory, "provider"), providerDirectory, { recursive: true });
 
   const localboxDirectory = join(applicationDirectory, "node_modules", "localbox");
-  await mkdir(join(localboxDirectory, "dist", "vercel"), { recursive: true });
+  await mkdir(join(localboxDirectory, "dist", "frontend", "vercel"), { recursive: true });
   await copyFile(
     join(projectDirectory, "package.json"),
     join(localboxDirectory, "package.json"),
   );
   await copyFile(
     join(fixtureDirectory, "localbox-vercel.js"),
-    join(localboxDirectory, "dist", "vercel", "index.js"),
+    join(localboxDirectory, "dist", "frontend", "vercel", "index.js"),
   );
   await cp(
     join(projectDirectory, "dist", "interception"),
