@@ -4,7 +4,7 @@ import type {
   FilesystemOperation,
   JsonObject,
   SandboxClient,
-} from "../runtime/index.js";
+} from "../../runtime/index.js";
 import {
   mutationMetadata,
   requestMetadata,

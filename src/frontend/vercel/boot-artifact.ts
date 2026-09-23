@@ -1,8 +1,8 @@
-import { resolveFrontendBootArtifact } from "../frontend/artifact-mappings.js";
+import { resolveFrontendBootArtifact } from "../artifact-mappings.js";
 import type {
   OciImageBootArtifact,
   SandboxFrontendMetadata,
-} from "../runtime/index.js";
+} from "../../runtime/index.js";
 
 export interface VercelBootSelection {
   readonly runtime?: string;

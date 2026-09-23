@@ -1,4 +1,4 @@
-import type { Sandbox } from "./sandbox.js";
+import type { VercelSandbox as Sandbox } from "./sandbox.js";
 
 export type SandboxStatus = "pending" | "running" | "stopping" | "stopped" | "failed";
 

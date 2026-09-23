@@ -1,13 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { createDefaultSandboxClient } from "../default-client.js";
 import type {
   ClientResult,
   JsonObject,
   MutationMetadata,
   RequestMetadata,
-  SandboxClient,
   SandboxError,
-} from "../runtime/index.js";
+} from "../../runtime/index.js";
 import {
   DockerUnavailableError,
   ImagePullError,
@@ -21,17 +19,6 @@ import {
   UnsupportedImageError,
   UnsupportedSandboxCapabilityError,
 } from "./errors.js";
-
-let sandboxClientFactory: () => SandboxClient = createDefaultSandboxClient;
-
-export function createSandboxClient(): SandboxClient {
-  return sandboxClientFactory();
-}
-
-/** @internal Test seam for exercising the compatibility frontend through a neutral client. */
-export function setSandboxClientFactory(factory: (() => SandboxClient) | null): void {
-  sandboxClientFactory = factory ?? createDefaultSandboxClient;
-}
 
 export function requestMetadata(): RequestMetadata {
   return { requestId: randomUUID(), deadline: null };

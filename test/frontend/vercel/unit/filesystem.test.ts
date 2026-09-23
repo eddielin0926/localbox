@@ -2,8 +2,8 @@ import { describe, expect, test } from "vitest";
 import {
   FILESYSTEM_TRANSFER_CHUNK_BYTES,
   FilesystemBridge,
-} from "../../src/runtime/filesystem-bridge.js";
-import { EmbeddedSandboxClient } from "../../src/runtime/index.js";
+} from "../../../../src/runtime/filesystem-bridge.js";
+import { EmbeddedSandboxClient } from "../../../../src/runtime/index.js";
 import type {
   ClientFailure,
   RawCommand,
@@ -13,9 +13,9 @@ import type {
   SandboxCapabilities,
   StartRawCommandResult,
   StartRawCommandRequest,
-} from "../../src/runtime/index.js";
-import { createFileSystem } from "../../src/vercel/filesystem.js";
-import { testCapabilitiesWithOperationSupport } from "../fixtures/runtime-capabilities.js";
+} from "../../../../src/runtime/index.js";
+import { createFileSystem } from "../../../../src/frontend/vercel/filesystem.js";
+import { testCapabilitiesWithOperationSupport } from "../../../fixtures/runtime-capabilities.js";
 
 const REFERENCE = { backendId: "memory-filesystem", backendType: "test" } as const;
 const ERROR_PREFIX = "LOCALBOX_FILESYSTEM_ERROR:";
